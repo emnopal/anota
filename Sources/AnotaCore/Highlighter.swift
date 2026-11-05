@@ -13,12 +13,24 @@ public final class Highlighter: @unchecked Sendable {  // used from one actor at
     private enum Engine {
         case treeSitter(TreeSitterEngine)
         case regex(NSRegularExpression, [Token])
+        case columns(Delimiter)  // CSV / TSV: each column its own colour ("rainbow CSV")
         case none
     }
 
     private let engine: Engine
 
+    /// CSV delimiter, sniffed from the text on first use (TSV is fixed).
+    private final class Delimiter: @unchecked Sendable {
+        var value: unichar?
+        init(_ v: unichar?) { value = v }
+    }
+    private static let rainbow: [Token] = [.key, .string, .number, .function, .type, .keyword, .heading, .emphasis]
+
     public init(_ language: Language) {
+        if language == .csv || language == .tsv {
+            engine = .columns(Delimiter(language == .tsv ? 9 : nil))
+            return
+        }
         if let ts = TreeSitterEngine(language) {
             engine = .treeSitter(ts)
             return
@@ -75,6 +87,23 @@ public final class Highlighter: @unchecked Sendable {  // used from one actor at
         switch engine {
         case .treeSitter(let ts): return ts.tokens(in: text, range: range)
         case .regex(let re, let tokens): return Self.regexTokens(re, tokens, text as String, range)
+        case .columns(let d):
+            let delim = d.value ?? {
+                let c = CSV.sniff(text.substring(to: min(text.length, 64_000))).utf16.first ?? 44
+                d.value = c
+                return c
+            }()
+            // ponytail: per-line split, so a quoted field spanning lines shifts colours until the next record.
+            var out: [(NSRange, Token)] = []
+            var loc = text.lineRange(for: NSRange(location: range.location, length: 0)).location
+            while loc < NSMaxRange(range) {
+                let line = text.lineRange(for: NSRange(location: loc, length: 0))
+                let fields = CSV.fieldRanges(in: text.substring(with: line) as NSString, base: line.location, delimiter: delim)
+                for (i, f) in fields.enumerated() where f.length > 0 { out.append((f, Self.rainbow[i % Self.rainbow.count])) }
+                loc = NSMaxRange(line)
+                if line.length == 0 { break }
+            }
+            return out
         case .none: return []
         }
     }
@@ -243,7 +272,7 @@ extension Language {
         let cFamily = [(block, Token.comment), (slash, .comment), (dq, .string), (sq, .string)]
 
         switch self {
-        case .plain:
+        case .plain, .sqlite, .excel, .csv, .tsv:  // CSV/TSV use the rainbow-column engine
             return []
         case .swift:
             return [(block, .comment), (slash, .comment), (#""""[\s\S]*?""""#, .string), (dq, .string),
@@ -283,6 +312,8 @@ extension Language {
             return [(block, .comment), (dq, .string), (sq, .string), (#"@[\w-]+"#, .keyword),
                     (#"[\w-]+(?=\s*:[^;{}\n]*[;}])"#, .key), (#"#[0-9a-fA-F]{3,8}\b"#, .number),
                     (#"-?\b\d+(?:\.\d+)?(?:px|em|rem|%|vh|vw|s|ms|deg)?\b"#, .number)]
+        case .jsonl:
+            return [(dq + #"(?=\s*:)"#, .key), (dq, .string), (kw("true false null"), .keyword), (num, .number)]
         case .dotenv:
             return [(#"(?:^|(?<=\s))#[^\n]*"#, .comment), (kw("export"), .keyword),
                     (#"[A-Za-z_][A-Za-z0-9_.]*(?=[ \t]*=)"#, .key), (dq, .string), (sq, .string),

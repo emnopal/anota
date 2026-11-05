@@ -210,11 +210,11 @@ final class CodeTextView: NSTextView {
     @objc private func toggleWrap() { Workspace.shared.wrap.toggle() }
 
     @objc private func formatDocument() {
-        if let b = Workspace.shared.active { Task { await Workspace.shared.format(b) } }
+        if let b = buffer ?? Workspace.shared.active { Task { await Workspace.shared.format(b) } }
     }
 
     @objc private func formatSelection() {
-        if let b = Workspace.shared.active { Task { await Workspace.shared.format(b, selection: true) } }
+        if let b = buffer ?? Workspace.shared.active { Task { await Workspace.shared.format(b, selection: true) } }
     }
 
     override func validateMenuItem(_ item: NSMenuItem) -> Bool {
@@ -306,7 +306,10 @@ final class CodeTextView: NSTextView {
         edit(r, "", select: NSRange(location: max(caret, 0), length: 0))
     }
 
-    @objc func insertLineBelow(_ sender: Any?) { insertLine(above: false) }
+    @objc func insertLineBelow(_ sender: Any?) {
+        if let run = buffer?.onCommandReturn { run(); return }  // SQL box: ⌘↩ runs the query
+        insertLine(above: false)
+    }
     @objc func insertLineAbove(_ sender: Any?) { insertLine(above: true) }
 
     private func insertLine(above: Bool) {
@@ -351,13 +354,36 @@ final class CodeTextView: NSTextView {
         showFindIndicator(for: found)
     }
 
-    /// Auto-indent: keep the current line's leading whitespace.
+    // MARK: Auto-closing pairs and indentation (logic in AnotaCore.AutoPair)
+
+    private func apply(_ e: AutoPair.Edit) {
+        if e.text.isEmpty && e.range.length == 0 { setSelectedRange(e.selection); return }  // step over a closer
+        edit(e.range, e.text, select: e.selection)
+    }
+
+    override func insertText(_ string: Any, replacementRange: NSRange) {
+        let s = (string as? String) ?? (string as? NSAttributedString)?.string ?? ""
+        if !hasMarkedText(), s.count == 1, let c = s.first, let lang = buffer?.language,
+           replacementRange.location == NSNotFound || replacementRange == selectedRange(),
+           let e = AutoPair.type(c, in: self.string as NSString, selection: selectedRange(), language: lang) {
+            apply(e)
+            return
+        }
+        super.insertText(string, replacementRange: replacementRange)
+    }
+
+    override func deleteBackward(_ sender: Any?) {
+        if let lang = buffer?.language, let e = AutoPair.backspace(in: string as NSString, selection: selectedRange(), language: lang) {
+            apply(e)
+            return
+        }
+        super.deleteBackward(sender)
+    }
+
+    /// Return keeps the indent, adds a level after `{ [ (`, and puts a closer that follows on its own line.
     override func insertNewline(_ sender: Any?) {
-        let s = string as NSString
-        let line = s.substring(with: s.lineRange(for: NSRange(location: selectedRange().location, length: 0)))
-        let indent = line.prefix { $0 == " " || $0 == "\t" }
-        super.insertNewline(sender)
-        if !indent.isEmpty { insertText(String(indent), replacementRange: selectedRange()) }
+        guard !hasMarkedText(), let lang = buffer?.language else { super.insertNewline(sender); return }
+        apply(AutoPair.newline(in: string as NSString, selection: selectedRange(), language: lang))
     }
 
     override func setSelectedRanges(_ ranges: [NSValue], affinity: NSSelectionAffinity, stillSelecting: Bool) {

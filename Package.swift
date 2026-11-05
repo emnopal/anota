@@ -50,6 +50,6 @@ let package = Package(
             dependencies: ["AnotaCore"],
             swiftSettings: [.defaultIsolation(MainActor.self)]
         ),
-        .testTarget(name: "AnotaCoreTests", dependencies: ["AnotaCore"]),
+        .testTarget(name: "AnotaCoreTests", dependencies: ["AnotaCore"], resources: [.copy("Fixtures")]),
     ]
 )

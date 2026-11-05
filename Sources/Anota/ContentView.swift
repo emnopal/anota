@@ -19,13 +19,16 @@ struct ContentView: View {
         .navigationTitle(ws.active?.name ?? "Anota")
         .navigationSubtitle(subtitle)
         .toolbar {
-            if let b = ws.active, b.modes.count > 1 {
-                ToolbarItem(placement: .principal) {
+            // Always present, content conditional: adding/removing the item itself, or changing the
+            // segment count in place, left a stale glass capsule (e.g. 3 icons for a 2-mode file).
+            ToolbarItem(placement: .principal) {
+                if let b = ws.active, b.modes.count > 1 {
                     Picker("View", selection: Binding(get: { b.viewMode }, set: { b.viewMode = $0 })) {
                         ForEach(b.modes, id: \.self) { m in Label(m.title, systemImage: m.symbol).tag(m) }
                     }
                     .pickerStyle(.segmented)
                     .help("View mode (⇧⌘V)")
+                    .id(b.modes.map(\.rawValue).joined(separator: ","))  // rebuild when the set of modes changes
                 }
             }
             // Before the file name/path, next to the sidebar toggle.
@@ -47,7 +50,13 @@ struct ContentView: View {
                     .disabled(ws.active == nil)
             }
         }
-        .onChange(of: ws.active?.id, initial: true) { ws.find.attach(ws.active) }
+        .onChange(of: ws.active?.id, initial: true) {
+            ws.find.attach(ws.active)
+            // Keep the tree's selection on the active file (nil when it's outside the folder). Otherwise
+            // the tree still "selects" an older file and clicking it again changes nothing, so it won't open.
+            let url = ws.active?.url
+            ws.treeSelection = url.flatMap { ws.tree?.find($0) } != nil ? url : nil
+        }
         .onChange(of: ws.active?.revision) { ws.find.update() }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             ws.checkDisk()
@@ -131,17 +140,9 @@ struct Sidebar: View {
                 }
             }
         }
-        .onChange(of: ws.treeSelection) { _, url in
-            guard let url else { return }
-            if let node = ws.tree?.find(url), node.isDirectory {
-                // Clicking a folder's name toggles it (before, only the small chevron did, so clicks
-                // on the name looked like the folder "randomly" refused to open).
-                node.expanded.toggle()
-                ws.treeSelection = nil
-            } else {
-                ws.open(url)
-            }
-        }
+        // Selection is only a highlight that follows the active tab (set in ContentView). Rows open files
+        // on click themselves: driving opens from selection changes let the list write back an old
+        // selection and re-open that file, so a tab outside the folder couldn't be selected.
     }
 }
 
@@ -158,11 +159,17 @@ struct FileRow: View {
                 }
             } label: {
                 Label(node.url.lastPathComponent, systemImage: "folder")
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+                    .onTapGesture { node.expanded.toggle() }  // the name toggles too, not only the chevron
             }
             .tag(node.url)
             .onChange(of: node.expanded) { _, open in if open && node.children == nil { node.load() } }
         } else {
             Label(node.url.lastPathComponent, systemImage: Language.detect(node.url).symbol)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+                .onTapGesture { Workspace.shared.open(node.url) }
                 .tag(node.url)
                 .contextMenu { FileContextMenu(url: node.url) }
         }
@@ -210,10 +217,13 @@ struct TabBar: View {
     @State private var width: CGFloat = 0
 
     var body: some View {
+        // Read the active tab here, in body itself: read only inside the ForEach closure it wasn't tracked when
+        // a file was opened from outside (Finder / Dock), so the new tab never drew as active.
+        let active = group.active
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 2) {
                 ForEach(group.tabs) { b in
-                    TabItem(buffer: b, active: group.active === b) { ws.close(b, in: group) }
+                    TabItem(buffer: b, active: active === b) { ws.close(b, in: group) }
                         .onTapGesture { group.active = b; ws.focusedID = group.id }
                         .draggable(b.id.uuidString)
                         .dropDestination(for: String.self) { items, _ in
@@ -406,11 +416,12 @@ struct GroupView: View {
                             MarkdownPreview(buffer: b, revision: b.revision)
                         }
                     case .text: editor(b)
+                    case .grid: DataView(ws: ws, buffer: b)
                     }
                 }
                 .id(b.id)
                 .overlay(alignment: .topTrailing) {
-                    if ws.find.visible && ws.focusedGroup === group && b.viewMode != .tree && b.viewMode != .preview {
+                    if ws.find.visible && ws.focusedGroup === group && [.text, .split].contains(b.viewMode) {
                         FindBar(find: ws.find)
                     }
                 }
@@ -436,7 +447,7 @@ extension GroupView {
 
 extension Buffer.ViewMode {
     var title: String {
-        switch self { case .text: "Text"; case .tree: "Tree"; case .preview: "Preview"; case .split: "Split" }
+        switch self { case .text: "Text"; case .tree: "Tree"; case .preview: "Preview"; case .split: "Split"; case .grid: "Grid" }
     }
     var symbol: String {
         switch self {
@@ -444,6 +455,7 @@ extension Buffer.ViewMode {
         case .tree: "list.bullet.indent"
         case .preview: "eye"
         case .split: "rectangle.split.2x1"
+        case .grid: "tablecells"
         }
     }
 }
@@ -546,6 +558,9 @@ extension Language {
         case .markdown: "text.alignleft"
         case .yaml, .toml, .ini: "gearshape"
         case .dotenv: "key"
+        case .csv, .tsv, .excel: "tablecells"
+        case .jsonl: "list.bullet.rectangle.portrait"
+        case .sqlite: "cylinder.split.1x2"
         case .log: "list.bullet.rectangle"
         case .batch, .powershell: "terminal.fill"
         case .html, .xml: "chevron.left.forwardslash.chevron.right"

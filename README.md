@@ -5,12 +5,13 @@
 A simple, fast code editor for macOS.
 Written in Swift (SwiftUI + AppKit).
 
-> Status: **v0.2.0**. Core features work and are unit-tested. See [`.changelog`](.changelog).
+> Status: **v0.3.0**. Core features work and are unit-tested. See [`.changelog`](.changelog).
 
 ## Features
 
 - **Editor:** syntax highlighting (tree-sitter for 14 languages, regex for the rest; incremental, so long files stay responsive), line numbers,
-  current-line highlight, auto-indent, word wrap (toolbar, View menu, right-click or ⌥Z), and per-file undo
+  current-line highlight, auto-indent, auto-closing `() [] {} "" '' `` <>` (wraps a selection, types over
+  closers, Backspace removes an empty pair, Return between `{}` opens an indented block), word wrap (toolbar, View menu, right-click or ⌥Z), and per-file undo
 - **Encodings and line endings:** UTF-8 / UTF-8 BOM / UTF-16 / Latin-1 detection, LF / CRLF / CR,
   convertible from the status bar
 - **Tabs:** horizontal, or vertical in a pinned "Tabs" sidebar section (⌥⌘T). Drag to reorder or to move between
@@ -27,6 +28,14 @@ Written in Swift (SwiftUI + AppKit).
   - copy value / copy path
   - jump to source
   - inline editing of JSON values
+- **Data viewer (Grid):** CSV, TSV, JSON Lines, SQLite (`.sqlite/.db`, read-only) and Excel (`.xlsx`, read-only)
+  - virtualised grid: sort (click a header), filter all or one column, guessed column types, copy cell / row / column
+    (⌘C copies rows as TSV), double-click a cell to see its full value, "Header row" toggle, export the shown rows as CSV or JSON
+  - schema panel: SQLite tables, views, columns, keys and indexes (inferred column types for other formats)
+  - **SQL box** (⌘↩ runs; SQLite dialect) with history; errors point at the line and column. SQLite files are queried
+    directly; CSV/TSV/JSONL/sheets are loaded into an in-memory database, one table per file or sheet
+    (`people.csv` → `people`)
+  - CSV/TSV text view colours each column (rainbow CSV); JSON Lines has a Table / Raw (pretty records) toggle
 - **Find & replace (⌘F / ⌥⌘F):** in the style of VS Code. Match case, whole word, regex (`$1` templates), preserve case
 - **Find in files (⇧⌘F):** include/exclude globs, results grouped by file, a replace preview, and Replace All
 - **Formatting:** Format Document (⌥⇧F), Format Selection (⌥⇧⌘F) and an optional Format on Save, using the
@@ -109,7 +118,7 @@ VS Code shortcuts (macOS bindings):
 | Move line up / down | ⌥↑ / ⌥↓ |
 | Copy line up / down | ⇧⌥↑ / ⇧⌥↓ |
 | Delete line | ⇧⌘K |
-| Insert line below / above | ⌘↩ / ⇧⌘↩ |
+| Insert line below / above (⌘↩ runs the query in the data viewer's SQL box) | ⌘↩ / ⇧⌘↩ |
 | Indent / outdent line | ⌘] / ⌘[ |
 | Expand line selection | ⌘L |
 | Select next occurrence (single selection) | ⌘D |
@@ -128,11 +137,12 @@ Not yet: Quick Open (⌘P), Command Palette (⇧⌘P), multi-cursor, and two-key
 Package.swift
 Sources/
   AnotaCore/      logic with no UI (unit-tested): file decoding, highlighting, session store,
-                  JSON/INI/plist/YAML/TOML parsing, search, formatter runner
+                  JSON/INI/plist/YAML/TOML parsing, search, formatter runner, line edits,
+                  data readers (CSV/TSV/JSONL, SQLite wrapper, XLSX)
     Queries/      tree-sitter highlight queries (generated)
-  Anota/          the app: SwiftUI + AppKit (workspace, editor view, tabs, sidebar, find, viewers)
+  Anota/          the app: SwiftUI + AppKit (workspace, editor view, tabs, sidebar, find, viewers, data grid)
 Tests/
-  AnotaCoreTests/
+  AnotaCoreTests/       (Fixtures/: sample.xlsx)
 Vendor/
   TreeSitterGrammars/   generated tree-sitter parsers (C), vendored from release tarballs
 scripts/
@@ -157,12 +167,12 @@ Don't edit `Vendor/` or `Sources/AnotaCore/Queries/` by hand. Change `scripts/ve
 
 ## Versioning & releases
 
-- `.version` holds the version (`0.2.0`). It sets the app's version; the build number is the commit count.
+- `.version` holds the version (`0.3.0`). It sets the app's version; the build number is the commit count.
 - `.changelog` has a `## v<version>` section per release; that section becomes the release notes.
 - CI (`.github/workflows/ci.yml`) runs `swift test` and `scripts/make-app.sh` on every push and pull request.
   When both pass on `main`, it publishes a GitHub release with the zipped app:
   - `.version` changed (no `v<version>` tag yet) → release **`v<version>`**
-  - `.version` unchanged → pre-release **`v<version>-rc-<UTC YYYYMMDDHHMMSS>`**, e.g. `v0.2.0-rc-20261030101010`
+  - `.version` unchanged → pre-release **`v<version>-rc-<UTC YYYYMMDDHHMMSS>`**, e.g. `v0.3.0-rc-20261030101010`
 - To release a new version: bump `.version`, add its section to `.changelog`, push to `main`.
 
 ## Data & privacy
@@ -179,6 +189,8 @@ Don't edit `Vendor/` or `Sources/AnotaCore/Queries/` by hand. Change `scripts/ve
 - No LSP, git integration or terminal
 - Very large files (several MB): colours of the edited line update after a short pause in typing
 - YAML / TOML / INI trees are view-only. Only JSON values can be edited in the tree
+- Data viewer: SQLite and Excel are read-only; grid cells can't be edited; files load fully into memory
+  (queries show at most 100,000 rows, sheets 200,000); no Parquet yet
 - Not notarized yet. On first launch, right-click → Open
 
 ## Third-party licenses

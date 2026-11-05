@@ -11,7 +11,7 @@ extension Language {
         case .batch: ("REM", "")
         case .html, .xml, .markdown: ("<!--", "-->")
         case .css: ("/*", "*/")
-        case .plain, .log: nil
+        case .plain, .log, .csv, .tsv, .jsonl, .sqlite, .excel: nil
         }
     }
 }

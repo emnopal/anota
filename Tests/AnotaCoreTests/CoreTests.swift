@@ -245,3 +245,44 @@ func incrementalParseMatchesFullParse(_ lang: Language) {
     #expect(LineEdits.indent("a\n\nb", unit: "  ") == "  a\n\n  b")
     #expect(LineEdits.indent("  a\n\tb\n c\n", unit: "    ", outdent: true) == "a\nb\nc\n")
 }
+
+private func typed(_ text: String, at caret: Int, _ c: Character, _ lang: Language = .swift, length: Int = 0) -> String? {
+    let ns = text as NSString
+    guard let e = AutoPair.type(c, in: ns, selection: NSRange(location: caret, length: length), language: lang) else { return nil }
+    let out = NSMutableString(string: ns.replacingCharacters(in: e.range, with: e.text))
+    out.insert("|", at: e.selection.location)  // mark the caret
+    return out as String
+}
+
+@Test func autoPairing() {
+    #expect(typed("f", at: 1, "(") == "f(|)")
+    #expect(typed("x = ", at: 4, "{") == "x = {|}")
+    #expect(typed("x = ", at: 4, "[") == "x = [|]")
+    #expect(typed("", at: 0, "\"") == "\"|\"")
+    #expect(typed("", at: 0, "`") == "`|`")
+    #expect(typed("", at: 0, "'", .python) == "'|'")
+    #expect(typed("f()", at: 2, ")") == "f()|")           // step over
+    #expect(typed("\"\"", at: 1, "\"") == "\"\"|")        // step over quote
+    #expect(typed("don", at: 3, "'", .python) == nil)    // apostrophe after a letter
+    #expect(typed("x", at: 0, "(") == nil)               // before a word: no pair
+    #expect(typed("a ", at: 2, "<") == nil)              // comparison
+    #expect(typed("Array", at: 5, "<") == "Array<|>")    // generic
+    #expect(typed("", at: 0, "<", .html) == "<|>")
+    #expect(typed("abc", at: 0, "(", length: 3) == "(|abc)")  // wraps; "abc" stays selected after the caret mark
+    #expect(typed("", at: 0, "(", .plain) == nil)
+    #expect(typed("    ", at: 4, "}") == "}|")           // outdent a lone closer
+}
+
+@Test func autoPairWrapBackspaceNewline() {
+    let ns = "say hi" as NSString
+    let w = AutoPair.type("\"", in: ns, selection: NSRange(location: 4, length: 2), language: .swift)!
+    #expect(ns.replacingCharacters(in: w.range, with: w.text) == "say \"hi\"" && w.selection == NSRange(location: 5, length: 2))
+    #expect(AutoPair.backspace(in: "f()" as NSString, selection: NSRange(location: 2, length: 0), language: .swift)
+            == .init(range: NSRange(location: 1, length: 2), text: "", selection: NSRange(location: 1, length: 0)))
+    #expect(AutoPair.backspace(in: "f(x)" as NSString, selection: NSRange(location: 2, length: 0), language: .swift) == nil)
+    let n = AutoPair.newline(in: "  if x {}" as NSString, selection: NSRange(location: 8, length: 0), language: .swift)
+    #expect(n.text == "\n      \n  " && n.selection.location == 8 + 7)
+    let m = AutoPair.newline(in: "  foo(" as NSString, selection: NSRange(location: 6, length: 0), language: .swift)
+    #expect(m.text == "\n      ")
+    #expect(AutoPair.newline(in: "\tx" as NSString, selection: NSRange(location: 2, length: 0), language: .swift).text == "\n\t")
+}

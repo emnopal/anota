@@ -11,7 +11,11 @@ final class Buffer: NSObject, Identifiable {
         didSet { if url != oldValue { language = Language.detect(url) } }
     }
     var language: Language {
-        didSet { highlighter = Highlighter(language); highlightAll() }
+        didSet {
+            highlighter = Highlighter(language)
+            highlightAll()
+            if !modes.contains(viewMode) { viewMode = modes[0] }
+        }
     }
     var encoding: String.Encoding = .utf8
     var lineEnding: LineEnding = .lf
@@ -28,6 +32,8 @@ final class Buffer: NSObject, Identifiable {
     @ObservationIgnored let storage = NSTextStorage()
     @ObservationIgnored let undoManager = UndoManager()
     @ObservationIgnored var onEdit: ((Buffer) -> Void)?
+    /// ⌘↩ in this buffer's editor runs this instead of "Insert Line Below" (the data viewer's SQL box).
+    @ObservationIgnored var onCommandReturn: (() -> Void)?
     @ObservationIgnored private var highlighter: Highlighter
     @ObservationIgnored private var loading = false
     @ObservationIgnored private var lineCache: LineIndex?
@@ -47,13 +53,15 @@ final class Buffer: NSObject, Identifiable {
         return l
     }
 
-    enum ViewMode: String, CaseIterable { case text, tree, preview, split }
+    enum ViewMode: String, CaseIterable { case text, tree, preview, split, grid }
 
     var name: String { url?.lastPathComponent ?? "Untitled" }
 
     var isPlist: Bool { url?.pathExtension.lowercased() == "plist" }
 
     var modes: [ViewMode] {
+        if language.isBinaryData { return [.grid] }
+        if language.isTabular { return [.grid, .text] }
         if language == .markdown { return [.text, .split, .preview] }
         if [.json, .yaml, .toml, .ini, .dotenv].contains(language) || isPlist { return [.text, .tree] }
         return [.text]
@@ -92,13 +100,23 @@ final class Buffer: NSObject, Identifiable {
         self.language = lang
         self.highlighter = Highlighter(lang)
         super.init()
+        viewMode = modes[0]  // data files open in the grid
         storage.delegate = self
         setText(text)
     }
 
     static func load(_ url: URL, id: UUID = UUID()) throws -> Buffer {
+        var lang = Language.detect(url)
+        if lang == .sqlite, !Self.hasSQLiteHeader(url) { lang = .plain }  // a ".db" that isn't SQLite: open as text
+        if lang.isBinaryData {
+            // SQLite / Excel: no text; the grid reads the file itself (revision bumps when it changes on disk).
+            let b = Buffer(id: id, url: url)
+            b.diskDate = modificationDate(url)
+            return b
+        }
         let file = try TextFile.read(url)
         let b = Buffer(id: id, url: url, text: file.text)
+        if b.language != lang { b.language = lang }
         b.encoding = file.encoding
         b.lineEnding = file.lineEnding
         b.diskDate = modificationDate(url)
@@ -113,6 +131,7 @@ final class Buffer: NSObject, Identifiable {
     }
 
     func write(to url: URL) throws {
+        precondition(!language.isBinaryData, "binary data files are never written as text")
         try TextFile(text: text, encoding: encoding, lineEnding: lineEnding).write(to: url)
         self.url = url
         isDirty = false
@@ -120,8 +139,15 @@ final class Buffer: NSObject, Identifiable {
         diskDate = modificationDate(url)
     }
 
+    private static func hasSQLiteHeader(_ url: URL) -> Bool {
+        guard let h = try? FileHandle(forReadingFrom: url) else { return false }
+        defer { try? h.close() }
+        return (try? h.read(upToCount: 16)) == Data("SQLite format 3\0".utf8)
+    }
+
     func reload() throws {
         guard let url else { return }
+        if language.isBinaryData { diskDate = modificationDate(url); revision += 1; return }
         let file = try TextFile.read(url)
         setText(file.text)
         encoding = file.encoding
@@ -160,6 +186,8 @@ final class Buffer: NSObject, Identifiable {
             }
             return
         }
+        // Normal-sized files: colour now, before the first frame, so a newly opened file never flashes uncoloured.
+        if storage.length <= Self.bigText, !parsingInBackground { drainRestyle(); return }
         scheduleRestyle()
     }
 
@@ -510,6 +538,8 @@ final class Workspace {
     func saveAll() { allBuffers.filter(\.isDirty).forEach { save($0) } }
 
     private func write(_ b: Buffer, to url: URL) -> Bool {
+        // SQLite / Excel tabs hold no text: saving would overwrite the file with nothing.
+        if b.language.isBinaryData { flash("“\(b.name)” is opened read-only"); return true }
         do {
             try b.write(to: url)
             scheduleSave()

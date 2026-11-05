@@ -4,6 +4,12 @@ public enum Language: String, CaseIterable, Codable, Sendable, Identifiable {
     case plain, swift, python, javascript, typescript, tsx, json, yaml, toml, ini, markdown
     case html, xml, css, shell, c, cpp, rust, go, java, ruby, sql
     case dotenv, log, batch, powershell
+    case csv, tsv, jsonl, sqlite, excel
+
+    /// Binary data files: opened as a read-only grid, never as text.
+    public var isBinaryData: Bool { self == .sqlite || self == .excel }
+    /// Shown in the data grid (Grid view mode).
+    public var isTabular: Bool { [.csv, .tsv, .jsonl, .sqlite, .excel].contains(self) }
 
     public var id: String { rawValue }
 
@@ -21,6 +27,11 @@ public enum Language: String, CaseIterable, Codable, Sendable, Identifiable {
         case .shell: "Shell (Bash/Zsh)"
         case .batch: "Batch"
         case .powershell: "PowerShell"
+        case .csv: "CSV"
+        case .tsv: "TSV"
+        case .jsonl: "JSON Lines"
+        case .sqlite: "SQLite"
+        case .excel: "Excel"
         case .html: "HTML"
         case .xml: "XML"
         case .css: "CSS"
@@ -46,6 +57,11 @@ public enum Language: String, CaseIterable, Codable, Sendable, Identifiable {
         case "ts", "mts", "cts": return .typescript
         case "tsx": return .tsx
         case "json", "jsonc", "json5", "geojson": return .json
+        case "jsonl", "ndjson": return .jsonl
+        case "csv": return .csv
+        case "tsv", "tab": return .tsv
+        case "sqlite", "sqlite3", "db", "db3": return .sqlite
+        case "xlsx", "xlsm": return .excel
         case "yml", "yaml": return .yaml
         case "toml": return .toml
         case "ini", "cfg", "conf", "properties": return .ini

@@ -3,6 +3,33 @@
 Newest first. Each release's notes are the section whose heading matches `.version`.
 A push to `main` that doesn't change `.version` is published as a pre-release `v<version>-rc-<UTC datetime>`.
 
+## v0.3.0
+
+Data viewer (CSV, TSV, JSON Lines, SQLite, Excel), auto-closing pairs.
+
+- Data viewer (Grid view) for CSV, TSV, JSON Lines, SQLite (`.sqlite`/`.db`, read-only) and Excel `.xlsx` (read-only):
+  - fast virtualised grid: sort by header (numbers numerically, NULLs last), row filter, row numbers, NULL dimmed
+  - copy cell / row / column from the right-click menu; ⌘C copies selected rows as TSV
+  - table / view picker (SQLite) and sheet picker (Excel); Excel dates, booleans and cached formula values
+  - CSV: quoted fields, line breaks in fields, separator and header detection; JSON Lines: one column per key,
+    invalid lines reported
+  - SQL box (⌘↩ runs): SQLite files queried directly; CSV/TSV/JSONL/sheets loaded into an in-memory database,
+    one table per file or sheet
+  - saving never writes to SQLite / Excel files
+  - schema panel (SQLite tables, columns, types, keys, indexes; column types guessed for other formats)
+  - real row counts for big SQLite tables, column filter, type glyphs in headers, "Header row" toggle
+  - SQL errors point at the line and column; query history; export rows as CSV or JSON
+  - CSV/TSV text view colours each column differently (rainbow CSV); faster CSV parsing
+  - JSON Lines: Table / Raw toggle (each record pretty-printed and coloured)
+  - double-click a cell to see its full value in a popover (selectable, JSON pretty-printed, Copy button)
+- Editor: auto-closing pairs `() [] {} "" '' `` <>` like VS Code — wrap the selection, type over the closer,
+  Backspace deletes an empty pair, Return inside `{}`/`[]`/`()` indents and puts the closer on its own line, a lone
+  closing bracket outdents; quotes don't pair after letters (don't), `<` pairs only in HTML/XML and for generics
+- Fix: a file opened from outside (Finder, Dock) didn't show as the active tab — the tab bar didn't track the
+  active-tab change; files in the tree now also open on click, the tree highlight just follows the active tab
+- Fix: opening a file no longer flashes it uncoloured (normal-sized files are coloured before the first frame)
+- Fix: the toolbar's view-mode switch kept stale segments after switching to a file with fewer (or no) modes
+
 ## v0.2.0
 
 Performance, more languages, VS Code shortcuts.
