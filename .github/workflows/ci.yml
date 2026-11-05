@@ -24,14 +24,22 @@ jobs:
       - name: Build app
         run: scripts/make-app.sh
       - name: Package
+        # GitHub release assets must be files, so the .app ships inside a disk image (open it, drag Anota.app out).
         run: |
           TAG=$(scripts/release-tag.sh)
+          ARCH=$(lipo -archs build/Anota.app/Contents/MacOS/Anota | tr ' ' '+')
+          NAME="Anota-$TAG-macos-$ARCH"
+          echo "NAME=$NAME" >> "$GITHUB_ENV"
           echo "TAG=$TAG" >> "$GITHUB_ENV"
-          ditto -c -k --keepParent build/Anota.app "Anota-$TAG-macos.zip"
+          echo "$TAG" > dist-tag.txt
+          mkdir -p dmg && cp -R build/Anota.app dmg/ && ln -s /Applications dmg/Applications
+          hdiutil create -volname "Anota $TAG" -srcfolder dmg -fs HFS+ -format UDZO "$NAME.dmg"
       - uses: actions/upload-artifact@v4
         with:
-          name: Anota-${{ env.TAG }}
-          path: Anota-${{ env.TAG }}-macos.zip
+          name: ${{ env.NAME }}
+          path: |
+            ${{ env.NAME }}.dmg
+            dist-tag.txt
           if-no-files-found: error
 
   release:
@@ -53,11 +61,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          ZIP=$(ls dist/*.zip)
-          TAG=$(basename "$ZIP" | sed -E 's/^Anota-(.*)-macos\.zip$/\1/')
+          DMG=$(ls dist/*.dmg)
+          TAG=$(cat dist/dist-tag.txt)
+          ARCH=$(basename "$DMG" .dmg | sed 's/.*-macos-//')
           scripts/release-notes.sh > notes.md
+          printf '\n**Download:** `%s` (%s, macOS 26+). Open the disk image and drag Anota.app to Applications.\n' "$(basename "$DMG")" "$ARCH" >> notes.md
           case "$TAG" in
             *-rc-*) PRE=--prerelease; printf '\nPre-release build of %s from %s.\n' "$(cat .version)" "$GITHUB_SHA" >> notes.md ;;
             *) PRE= ;;
           esac
-          gh release create "$TAG" "$ZIP" --target "$GITHUB_SHA" --title "Anota $TAG" --notes-file notes.md $PRE
+          gh release create "$TAG" "$DMG" --target "$GITHUB_SHA" --title "Anota $TAG" --notes-file notes.md $PRE

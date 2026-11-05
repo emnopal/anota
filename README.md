@@ -1,4 +1,6 @@
-# Anota
+<p align="center"><img src="assets/AppIcon.png" width="128" alt="Anota icon"></p>
+
+<h1 align="center">Anota</h1>
 
 A simple, fast code editor for macOS.
 Written in Swift (SwiftUI + AppKit).
@@ -56,8 +58,8 @@ Homebrew, cargo, go and `~/.local` bin folders. Each tool runs in the file's fol
 
 ## Install
 
-Download `Anota-<version>-macos.zip` from [Releases](https://github.com/emnopal/anota/releases), unzip, and move
-`Anota.app` to Applications. The app is ad-hoc signed, not notarized: on first launch right-click → Open, or run
+Download `Anota-<version>-macos-arm64.dmg` from [Releases](https://github.com/emnopal/anota/releases), open it, and
+drag `Anota.app` to Applications. Builds are **arm64 (Apple Silicon)** only; Intel Macs can build from source. The app is ad-hoc signed, not notarized: on first launch right-click → Open, or run
 `xattr -dr com.apple.quarantine /Applications/Anota.app`.
 
 ## Requirements
