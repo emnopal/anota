@@ -3,16 +3,18 @@
 A simple, fast code editor for macOS.
 Written in Swift (SwiftUI + AppKit).
 
-> Status: early development (v0.1). Core features work and are unit-tested; the UI has not had a visual polish pass yet.
+> Status: **v0.1** — first release. Core features work and are unit-tested. See [`.changelog`](.changelog).
 
 ## Features
 
 - **Editor:** syntax highlighting (tree-sitter for 13 languages, regex for the rest), line numbers,
-  current-line highlight, auto-indent, word wrap (⌥Z), and per-file undo
+  current-line highlight, auto-indent, word wrap (toolbar, View menu, right-click or ⌥Z), and per-file undo
 - **Encodings and line endings:** UTF-8 / UTF-8 BOM / UTF-16 / Latin-1 detection, LF / CRLF / CR,
   convertible from the status bar
-- **Tabs:** horizontal, or vertical in the sidebar (⌥⌘T). Drag to reorder or to move between panes
-- **Split view (⌘\\):** the same file in two panes is edited live in both
+- **Tabs:** horizontal, or vertical in a pinned "Tabs" sidebar section (⌥⌘T). Drag to reorder or to move between
+  panes. Close Others / Close Tabs to the Left / to the Right / Close All
+- **Split view (⌘\\):** panes share the width equally, with draggable dividers. The same file in two panes is edited
+  live in both
 - **Directory tree:** open a folder to see a lazy-loading file tree. `.git`, `node_modules` and `.build` are hidden
 - **Session restore (hot exit):** quitting never asks to save. Unsaved and untitled files, tabs, splits and the
   open folder all come back on relaunch. A crash loses at most about one second of typing
@@ -24,8 +26,8 @@ Written in Swift (SwiftUI + AppKit).
   - inline editing of JSON values
 - **Find & replace (⌘F / ⌥⌘F):** in the style of VS Code. Match case, whole word, regex (`$1` templates), preserve case
 - **Find in files (⇧⌘F):** include/exclude globs, results grouped by file, a replace preview, and Replace All
-- **Formatting:** Format Document (⌥⇧F) and an optional Format on Save, using the standard tool for each language
-  (see below)
+- **Formatting:** Format Document (⌥⇧F), Format Selection (⌥⇧⌘F) and an optional Format on Save, using the
+  standard tool for each language (see below). Also in the toolbar and the editor's right-click menu
 - **External changes:** files changed on disk reload. If you also have unsaved edits, Anota asks which version to keep
 
 ### Syntax highlighting
@@ -51,6 +53,12 @@ Homebrew, cargo, go and `~/.local` bin folders. Each tool runs in the file's fol
 | Swift | `swift-format`, or `xcrun swift-format` (Xcode) |
 | Python | `ruff`, then `black` |
 | TOML / shell / XML | `taplo` / `shfmt` / `xmllint` |
+
+## Install
+
+Download `Anota-<version>-macos.zip` from [Releases](https://github.com/emnopal/anota/releases), unzip, and move
+`Anota.app` to Applications. The app is ad-hoc signed, not notarized: on first launch right-click → Open, or run
+`xattr -dr com.apple.quarantine /Applications/Anota.app`.
 
 ## Requirements
 
@@ -79,12 +87,12 @@ open -a build/Anota.app path/to/folder path/to/file.json
 
 | Action | Shortcut |
 |---|---|
-| New / Open / Close tab | ⌘N / ⌘O / ⌘W |
+| New / Open / Close tab (or empty pane) / Close all tabs | ⌘N / ⌘O / ⌘W / ⌥⌘W |
 | Save / Save As / Save All | ⌘S / ⇧⌘S / ⌥⌘S |
 | Find / Find and Replace | ⌘F / ⌥⌘F |
 | Find next / previous / use selection | ⌘G / ⇧⌘G / ⌘E |
 | Find in Files | ⇧⌘F |
-| Format Document | ⌥⇧F |
+| Format Document / Format Selection | ⌥⇧F / ⌥⇧⌘F |
 | Split editor | ⌘\\ |
 | Vertical tabs | ⌥⌘T |
 | Word wrap | ⌥Z |
@@ -105,6 +113,11 @@ Vendor/
   TreeSitterGrammars/   generated tree-sitter parsers (C), vendored from release tarballs
 scripts/
   make-app.sh           build the .app bundle
+  make-icon.swift       render assets/AppIcon.icns
+  release-tag.sh        next release tag from .version
+  release-notes.sh      the .changelog section for .version
+assets/                 app icon
+.github/workflows/      CI: test, build, release
   vendor-grammars.sh    re-fetch tree-sitter grammars + queries (bump versions there)
 ```
 
@@ -117,6 +130,16 @@ The tree-sitter grammars are vendored rather than added as packages. Two reasons
 - Several grammar packages have manifests that leave out their external scanner, so they fail to link.
 
 Don't edit `Vendor/` or `Sources/AnotaCore/Queries/` by hand. Change `scripts/vendor-grammars.sh` and re-run it.
+
+## Versioning & releases
+
+- `.version` holds the version (`0.1`). It sets the app's version; the build number is the commit count.
+- `.changelog` has a `## v<version>` section per release; that section becomes the release notes.
+- CI (`.github/workflows/ci.yml`) runs `swift test` and `scripts/make-app.sh` on every push and pull request.
+  When both pass on `main`, it publishes a GitHub release with the zipped app:
+  - `.version` changed (no `v<version>` tag yet) → release **`v<version>`**
+  - `.version` unchanged → pre-release **`v<version>-rc-<UTC YYYYMMDDHHMMSS>`**, e.g. `v0.1-rc-20261030101010`
+- To release a new version: bump `.version`, add its section to `.changelog`, push to `main`.
 
 ## Data & privacy
 

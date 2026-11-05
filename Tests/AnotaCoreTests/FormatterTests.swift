@@ -81,3 +81,12 @@ private func fakeTools(_ scripts: [String: String]) throws -> URL {
     #expect(CodeFormatter.loginShellPath.contains("/usr/bin"))
     #expect(CodeFormatter.find("sh", in: "/bin") != nil)
 }
+
+@Test func fragmentKeepsIndentAndNewline() async {
+    // The fake formatter collapses double spaces and adds a trailing newline, like real tools.
+    let fake: (String) async -> String = { $0.replacingOccurrences(of: "  =", with: " =") + "\n" }
+    let out = await formatFragment("    x  = 1\n      y  = 2", with: fake)
+    #expect(out == "    x = 1\n      y = 2")
+    let seen = await formatFragment("\tif a:\n\t\tb\n") { s in #expect(s == "if a:\n\tb\n"); return s }
+    #expect(seen == "\tif a:\n\t\tb\n")
+}

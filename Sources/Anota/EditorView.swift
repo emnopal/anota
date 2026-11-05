@@ -168,6 +168,54 @@ final class CodeTextView: NSTextView {
         return ok
     }
 
+    // The find bar floats over the editor, but the text view's tracking area still sets the
+    // I-beam there. Show the normal arrow while the pointer is over the bar.
+    private func isOverFindBar(_ e: NSEvent) -> Bool {
+        guard let content = window?.contentView else { return false }
+        var p = content.convert(e.locationInWindow, from: nil)
+        if !content.isFlipped { p.y = content.bounds.height - p.y }
+        return Workspace.shared.find.barFrame.contains(p)
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        if isOverFindBar(event) { NSCursor.arrow.set() } else { super.mouseMoved(with: event) }
+    }
+
+    override func cursorUpdate(with event: NSEvent) {
+        if isOverFindBar(event) { NSCursor.arrow.set() } else { super.cursorUpdate(with: event) }
+    }
+
+    /// Right-click: the standard text menu plus formatting, mirroring the Edit menu.
+    override func menu(for event: NSEvent) -> NSMenu? {
+        onFocus?()  // right-click doesn't take focus; make this pane's buffer the active one
+        let menu = super.menu(for: event) ?? NSMenu()
+        menu.insertItem(.separator(), at: 0)
+        let wrap = NSMenuItem(title: "Word Wrap", action: #selector(toggleWrap), keyEquivalent: "")
+        wrap.state = Workspace.shared.wrap ? .on : .off
+        menu.insertItem(wrap, at: 0)
+        menu.insertItem(.separator(), at: 0)
+        let sel = NSMenuItem(title: "Format Selection", action: #selector(formatSelection), keyEquivalent: "")
+        sel.isEnabled = selectedRange().length > 0
+        menu.insertItem(sel, at: 0)
+        menu.insertItem(NSMenuItem(title: "Format Document", action: #selector(formatDocument), keyEquivalent: ""), at: 0)
+        return menu
+    }
+
+    @objc private func toggleWrap() { Workspace.shared.wrap.toggle() }
+
+    @objc private func formatDocument() {
+        if let b = Workspace.shared.active { Task { await Workspace.shared.format(b) } }
+    }
+
+    @objc private func formatSelection() {
+        if let b = Workspace.shared.active { Task { await Workspace.shared.format(b, selection: true) } }
+    }
+
+    override func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        if item.action == #selector(formatSelection) { return selectedRange().length > 0 }
+        return super.validateMenuItem(item)
+    }
+
     /// Auto-indent: keep the current line's leading whitespace.
     override func insertNewline(_ sender: Any?) {
         let s = string as NSString

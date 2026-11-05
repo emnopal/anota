@@ -45,6 +45,7 @@ struct AppCommands: Commands {
             Button("Open…") { ws.openPanel() }.keyboardShortcut("o")
             Divider()
             Button("Close Tab") { ws.closeActive() }.keyboardShortcut("w")
+            Button("Close All Tabs") { ws.groups.forEach(ws.closeAll) }.keyboardShortcut("w", modifiers: [.command, .option])
         }
         CommandGroup(replacing: .saveItem) {
             Button("Save") { if let b = ws.active { ws.saveCommand(b) } }.keyboardShortcut("s")
@@ -68,6 +69,10 @@ struct AppCommands: Commands {
                 if let b = ws.active { Task { await ws.format(b) } }
             }
             .keyboardShortcut("f", modifiers: [.option, .shift])
+            Button("Format Selection") {
+                if let b = ws.active { Task { await ws.format(b, selection: true) } }
+            }
+            .keyboardShortcut("f", modifiers: [.command, .option, .shift])
             Toggle("Format on Save", isOn: Binding(get: { ws.formatOnSave }, set: { ws.formatOnSave = $0 }))
             Button("Minify JSON") { ws.minifyJSON() }
         }

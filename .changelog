@@ -1,0 +1,22 @@
+# Changelog
+
+Newest first. Each release's notes are the section whose heading matches `.version`.
+A push to `main` that doesn't change `.version` is published as a pre-release `v<version>-rc-<UTC datetime>`.
+
+## v0.1
+
+First release.
+
+- Editor: tree-sitter highlighting for 13 languages (regex for the rest), line numbers, current-line highlight,
+  auto-indent, word wrap (toolbar, View menu, right-click, ⌥Z), per-file undo
+- Encodings (UTF-8 / BOM / UTF-16 / Latin-1) and line endings (LF / CRLF / CR)
+- Tabs: horizontal or vertical (pinned "Tabs" sidebar section); drag to reorder or move between panes;
+  Close Others / Close Tabs to the Left / to the Right / Close All
+- Split view with equal-width panes and draggable dividers; empty panes can be closed
+- Directory tree, session restore (hot exit)
+- Markdown Text / Split / Preview
+- Tree viewer for JSON, YAML, TOML, INI / .env, plist; inline JSON value editing
+- Find & replace (VS Code-style options, async matching, jumps to match while typing) and Find in Files
+- Format Document (⌥⇧F) and Format Selection (⌥⇧⌘F) via prettier, gofmt, rustfmt, clang-format, swift-format,
+  ruff/black, taplo, shfmt, xmllint; built-in JSON formatter; optional Format on Save
+- App icon

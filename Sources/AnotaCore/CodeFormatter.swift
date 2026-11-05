@@ -178,3 +178,19 @@ public func minimalEdit(from old: String, to new: String) -> (range: NSRange, re
     let replacement = String(decoding: b[prefix..<(b.count - suffix)], as: UTF16.self)
     return (NSRange(location: prefix, length: a.count - suffix - prefix), replacement)
 }
+
+/// Format a fragment (a selection): strip its common indentation so tools see top-level code,
+/// format, then restore the indentation and the fragment's trailing-newline state.
+public func formatFragment(
+    _ fragment: String, isolation: isolated (any Actor)? = #isolation, with format: (String) async throws -> String
+) async rethrows -> String {
+    let lines = fragment.components(separatedBy: "\n")
+    let indents = lines.filter { !$0.allSatisfy(\.isWhitespace) }.map { $0.prefix { $0 == " " || $0 == "\t" } }
+    let common = indents.min { $0.count < $1.count }.map(String.init) ?? ""
+    let dedented = lines.map { $0.hasPrefix(common) ? String($0.dropFirst(common.count)) : $0 }.joined(separator: "\n")
+    var out = try await format(dedented)
+    let endsWithNewline = fragment.hasSuffix("\n")
+    while out.hasSuffix("\n") { out.removeLast() }
+    out = out.components(separatedBy: "\n").map { $0.isEmpty ? $0 : common + $0 }.joined(separator: "\n")
+    return endsWithNewline ? out + "\n" : out
+}

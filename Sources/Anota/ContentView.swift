@@ -10,9 +10,7 @@ struct ContentView: View {
                 .navigationSplitViewColumnWidth(min: 180, ideal: 240, max: 400)
         } detail: {
             VStack(spacing: 0) {
-                HSplitView {
-                    ForEach(ws.groups) { g in GroupView(ws: ws, group: g) }
-                }
+                SplitPanes(items: ws.groups) { g in GroupView(ws: ws, group: g) }
                 StatusBar(ws: ws)
             }
         }
@@ -28,13 +26,23 @@ struct ContentView: View {
                     .help("View mode (⇧⌘V)")
                 }
             }
-            ToolbarItemGroup(placement: .primaryAction) {
+            // Before the file name/path, next to the sidebar toggle.
+            ToolbarItem(placement: .navigation) {
                 Button { ws.verticalTabs.toggle() } label: {
                     Label("Tab Layout", systemImage: ws.verticalTabs ? "rectangle.split.1x2" : "sidebar.squares.left")
                 }
                 .help(ws.verticalTabs ? "Horizontal tabs" : "Vertical tabs")
+            }
+            ToolbarItemGroup(placement: .primaryAction) {
+                Toggle(isOn: $ws.wrap) { Label("Word Wrap", systemImage: "text.word.spacing") }
+                    .help(ws.wrap ? "Turn off word wrap (⌥Z)" : "Wrap long lines (⌥Z)")
                 Button { ws.split() } label: { Label("Split", systemImage: "square.split.2x1") }
                     .help("Split editor (⌘\\)")
+                Button {
+                    if let b = ws.active { Task { await ws.format(b, selection: true) } }
+                } label: { Label("Format", systemImage: "text.alignleft") }
+                    .help("Format Document (⌥⇧F), or the selection if there is one")
+                    .disabled(ws.active == nil)
             }
         }
         .onChange(of: ws.active?.id, initial: true) { ws.find.attach(ws.active) }
@@ -64,6 +72,10 @@ struct Sidebar: View {
             .pickerStyle(.segmented)
             .labelsHidden()
             .padding(.horizontal, 10)
+            if ws.verticalTabs {
+                tabs
+                Divider()
+            }
             if ws.sidebarMode == .search {
                 SearchPanel(ws: ws, search: ws.projectSearch)
             } else {
@@ -72,16 +84,24 @@ struct Sidebar: View {
         }
     }
 
-    private var files: some View {
-        List(selection: $ws.treeSelection) {
-            if ws.verticalTabs {
-                ForEach(Array(ws.groups.enumerated()), id: \.element.id) { i, g in
-                    Section(ws.groups.count > 1 ? "Group \(i + 1)" : "Open Editors") {
-                        ForEach(g.tabs) { b in VerticalTabRow(ws: ws, group: g, buffer: b) }
-                            .onMove { from, to in g.tabs.move(fromOffsets: from, toOffset: to); ws.scheduleSave() }
-                    }
+    /// Vertical tabs, pinned above both the file tree and the search panel.
+    /// Sized to its rows, capped so the panel below keeps most of the space.
+    private var tabs: some View {
+        let rows = ws.groups.reduce(0) { $0 + $1.tabs.count + 1 }
+        return List {
+            ForEach(Array(ws.groups.enumerated()), id: \.element.id) { i, g in
+                Section(ws.groups.count > 1 ? "Tabs · Group \(i + 1)" : "Tabs") {
+                    ForEach(g.tabs) { b in VerticalTabRow(ws: ws, group: g, buffer: b) }
+                        .onMove { from, to in g.tabs.move(fromOffsets: from, toOffset: to); ws.scheduleSave() }
                 }
             }
+        }
+        .listStyle(.sidebar)
+        .frame(height: min(CGFloat(rows) * 26 + 12, 260))
+    }
+
+    private var files: some View {
+        List(selection: $ws.treeSelection) {
             if let tree = ws.tree {
                 Section(tree.url.lastPathComponent) {
                     ForEach(tree.children ?? []) { FileRow(node: $0) }
@@ -90,7 +110,7 @@ struct Sidebar: View {
         }
         .listStyle(.sidebar)
         .overlay {
-            if ws.tree == nil && !ws.verticalTabs {
+            if ws.tree == nil {
                 VStack(spacing: 8) {
                     Text("No Folder Open").foregroundStyle(.secondary)
                     Button("Open Folder…") { ws.openPanel() }
@@ -252,6 +272,11 @@ struct TabContextMenu: View {
     var body: some View {
         Button("Close") { ws.close(buffer, in: group) }
         Button("Close Others") { ws.closeOthers(buffer, in: group) }
+        Button("Close Tabs to the Left") { ws.closeTabs(to: .left, of: buffer, in: group) }
+            .disabled(group.tabs.first === buffer)
+        Button("Close Tabs to the Right") { ws.closeTabs(to: .right, of: buffer, in: group) }
+            .disabled(group.tabs.last === buffer)
+        Button("Close All") { ws.closeAll(in: group) }
         Divider()
         Button("Split Right") { group.active = buffer; ws.focusedID = group.id; ws.split() }
         if let url = buffer.url {
@@ -262,6 +287,55 @@ struct TabContextMenu: View {
 }
 
 // MARK: Editor group
+
+/// Side-by-side panes with draggable dividers. Unlike HSplitView, adding or removing a pane
+/// re-divides the width equally, so a new split never opens squeezed to its minimum width.
+struct SplitPanes<Item: Identifiable, Pane: View>: View {
+    let items: [Item]
+    @ViewBuilder let pane: (Item) -> Pane
+    @State private var widths: [Item.ID: CGFloat] = [:]  // fractions; empty = equal
+    @State private var dragStart: (CGFloat, CGFloat)?
+    private let minWidth: CGFloat = 220
+
+    var body: some View {
+        GeometryReader { geo in
+            let avail = max(geo.size.width - CGFloat(items.count - 1), 1)
+            HStack(spacing: 0) {
+                ForEach(Array(items.enumerated()), id: \.element.id) { i, item in
+                    if i > 0 { divider(between: items[i - 1].id, and: item.id, avail: avail) }
+                    pane(item).frame(width: avail * fraction(item.id))
+                }
+            }
+        }
+        .onChange(of: items.map(\.id)) { widths = [:] }
+    }
+
+    private func fraction(_ id: Item.ID) -> CGFloat { widths[id] ?? 1 / CGFloat(max(items.count, 1)) }
+
+    private func divider(between a: Item.ID, and b: Item.ID, avail: CGFloat) -> some View {
+        Rectangle()
+            .fill(Color(nsColor: .separatorColor))
+            .frame(width: 1)
+            .overlay {
+                Color.clear
+                    .frame(width: 9)
+                    .contentShape(Rectangle())
+                    .pointerStyle(.columnResize)
+                    .gesture(DragGesture(minimumDistance: 1)
+                        .onChanged { g in
+                            let start = dragStart ?? (fraction(a), fraction(b))
+                            dragStart = start
+                            let total = start.0 + start.1, lo = min(minWidth / avail, total / 2)
+                            let left = min(max(start.0 + g.translation.width / avail, lo), total - lo)
+                            var w = Dictionary(uniqueKeysWithValues: items.map { ($0.id, fraction($0.id)) })
+                            w[a] = left
+                            w[b] = total - left
+                            widths = w
+                        }
+                        .onEnded { _ in dragStart = nil })
+            }
+    }
+}
 
 struct GroupView: View {
     let ws: Workspace
@@ -294,10 +368,10 @@ struct GroupView: View {
                     }
                 }
             } else {
-                EmptyEditor(ws: ws)
+                EmptyEditor(ws: ws, group: group)
             }
         }
-        .frame(minWidth: 220, maxWidth: .infinity, maxHeight: .infinity)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .overlay(alignment: .top) {
             if ws.groups.count > 1 && ws.focusedGroup === group {
                 Rectangle().fill(Color.accentColor).frame(height: 2)
@@ -348,6 +422,7 @@ struct ConflictBanner: View {
 
 struct EmptyEditor: View {
     let ws: Workspace
+    let group: EditorGroup
     var body: some View {
         VStack(spacing: 14) {
             Image(systemName: "doc.text")
@@ -356,11 +431,16 @@ struct EmptyEditor: View {
             HStack {
                 Button("New File") { ws.newFile() }
                 Button("Open…") { ws.openPanel() }
+                if ws.groups.count > 1 {
+                    Button("Close Pane") { ws.dropIfEmpty(group); ws.scheduleSave() }
+                }
             }
             .controlSize(.large)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(nsColor: .textBackgroundColor))
+        .contentShape(Rectangle())
+        .onTapGesture { ws.focusedID = group.id }  // no text view here to take focus
     }
 }
 

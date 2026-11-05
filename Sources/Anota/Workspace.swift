@@ -338,21 +338,34 @@ final class Workspace {
     /// Format with the language's formatter (prettier, gofmt, rustfmt, …; built-in for JSON).
     /// `quiet` (format on save): no message when the language simply has no formatter.
     /// The result is discarded if the buffer was edited while the tool ran.
+    /// With `selection` (and a non-empty selection) only the selected text is formatted.
     @discardableResult
-    func format(_ b: Buffer, quiet: Bool = false) async -> Bool {
+    func format(_ b: Buffer, selection: Bool = false, quiet: Bool = false) async -> Bool {
         guard formatting.insert(b.id).inserted else { return false }
         defer { formatting.remove(b.id) }
-        let (text, revision) = (b.text, b.revision)
+        let range = selection && b.selection.length > 0 ? b.selection : nil
+        let text = range.map { (b.text as NSString).substring(with: $0) } ?? b.text
+        let revision = b.revision
         if !quiet { flash("Formatting…") }
         do {
             let path = await Task.detached { CodeFormatter.loginShellPath }.value
-            let r = try await CodeFormatter.format(text, language: b.language, fileURL: b.url, searchPath: path)
+            var tool = ""
+            let run: (String) async throws -> String = { s in
+                let r = try await CodeFormatter.format(s, language: b.language, fileURL: b.url, searchPath: path)
+                tool = r.tool
+                return r.text
+            }
+            let out = try await range == nil ? run(text) : formatFragment(text, with: run)
             guard b.revision == revision else {
                 flash("Not formatted: “\(b.name)” changed while formatting.")
                 return false
             }
-            b.replaceAll(with: r.text)
-            flash(r.text == text ? "Already formatted (\(r.tool))" : "Formatted with \(r.tool)")
+            if let range {
+                if out != text { b.replace(range, with: out) }
+            } else {
+                b.replaceAll(with: out)
+            }
+            flash(out == text ? "Already formatted (\(tool))" : "Formatted \(range == nil ? "" : "selection ")with \(tool)")
             return true
         } catch {
             if quiet, case .noFormatter? = error as? CodeFormatter.Failure { return false }
@@ -427,8 +440,20 @@ final class Workspace {
         for other in g.tabs where other !== b { close(other, in: g) }
     }
 
+    enum Side { case left, right }
+
+    func closeTabs(to side: Side, of b: Buffer, in g: EditorGroup) {
+        guard let i = g.tabs.firstIndex(of: b) else { return }
+        for other in side == .left ? Array(g.tabs[..<i]) : Array(g.tabs[(i + 1)...]) { close(other, in: g) }
+    }
+
+    func closeAll(in g: EditorGroup) {
+        for b in g.tabs { close(b, in: g) }
+    }
+
+    /// ⌘W: close the focused tab, or the focused pane itself when it has no tabs.
     func closeActive() {
-        if let b = active { close(b, in: focusedGroup) }
+        if let b = active { close(b, in: focusedGroup) } else { dropIfEmpty(focusedGroup); scheduleSave() }
     }
 
     func split() {
@@ -454,7 +479,7 @@ final class Workspace {
         scheduleSave()
     }
 
-    private func dropIfEmpty(_ g: EditorGroup) {
+    func dropIfEmpty(_ g: EditorGroup) {
         guard g.tabs.isEmpty, groups.count > 1, let i = groups.firstIndex(where: { $0 === g }) else { return }
         groups.remove(at: i)
         if focusedID == g.id { focusedID = groups[max(0, i - 1)].id }

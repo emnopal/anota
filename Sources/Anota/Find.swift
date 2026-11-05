@@ -7,15 +7,21 @@ import SwiftUI
 final class FindController {
     var visible = false
     var showReplace = false
-    var options = SearchOptions() { didSet { if options != oldValue { update() } } }
+    var options = SearchOptions() {
+        didSet { if options != oldValue { update(reveal: options.query != oldValue.query) } }
+    }
     var replacement = ""
     var matches: [NSRange] = []
     var current: Int?
     var invalid = false
     var focusToken = 0  // bump to focus the find field
+    /// The bar's frame in window content coordinates (top-left origin), so the editor underneath
+    /// can show an arrow instead of its I-beam while the pointer is over the bar.
+    @ObservationIgnored var barFrame = CGRect.zero
 
     @ObservationIgnored private weak var buffer: Buffer?
     @ObservationIgnored private var highlighted: [NSRange] = []
+    @ObservationIgnored private var task: Task<Void, Never>?
 
     func open(replace: Bool, buffer: Buffer?) {
         if let b = buffer, b.selection.length > 0, b.selection.length < 200 {
@@ -30,6 +36,7 @@ final class FindController {
 
     func close() {
         visible = false
+        barFrame = .zero
         clearHighlight()
         matches = []
         current = nil
@@ -47,17 +54,43 @@ final class FindController {
         options.query = (b.text as NSString).substring(with: b.selection)
     }
 
-    /// Recompute matches (query/options/text changed).
-    func update() {
-        clearHighlight()
-        guard visible, let b = buffer, !options.query.isEmpty else { matches = []; current = nil; invalid = false; return }
-        guard let re = try? options.compile() else { matches = []; current = nil; invalid = true; return }
-        invalid = false
-        // ponytail: capped at 10K highlighted matches.
-        matches = Array(re.matches(in: b.text, range: NSRange(location: 0, length: b.storage.length))
-            .lazy.map(\.range).filter { $0.length > 0 }.prefix(10_000))
+    /// Recompute matches (query/options/text changed). Matching runs off the main thread so typing
+    /// stays smooth on big files; a newer call cancels an older one. `reveal` jumps to the nearest
+    /// match (as you type the query), like VS Code.
+    func update(reveal: Bool = false) {
+        task?.cancel()
+        guard visible, let b = buffer, !options.query.isEmpty else {
+            clearHighlight(); matches = []; current = nil; invalid = false; return
+        }
+        let (text, o) = (b.text, options)
+        task = Task {
+            let found = await Task.detached { Self.search(text, o) }.value
+            guard !Task.isCancelled, b === buffer, b.text == text else { return }
+            apply(found, reveal: reveal)
+        }
+    }
+
+    /// Synchronous variant for replace, which needs fresh matches immediately.
+    private func updateNow() {
+        task?.cancel()
+        guard let b = buffer, !options.query.isEmpty else { return }
+        apply(Self.search(b.text, options), reveal: false)
+    }
+
+    private func apply(_ found: [NSRange]?, reveal: Bool) {
+        guard let b = buffer else { return }
+        invalid = found == nil
+        matches = found ?? []
         current = matches.firstIndex { $0.location >= b.selection.location } ?? (matches.isEmpty ? nil : 0)
         highlight()
+        if reveal, let i = current { b.reveal = matches[i] }
+    }
+
+    /// nil = invalid regex. ponytail: capped at 10K matches.
+    nonisolated private static func search(_ text: String, _ o: SearchOptions) -> [NSRange]? {
+        guard let re = try? o.compile() else { return nil }
+        return Array(re.matches(in: text, range: NSRange(location: 0, length: (text as NSString).length))
+            .lazy.map(\.range).filter { $0.length > 0 }.prefix(10_000))
     }
 
     func highlight() {
@@ -93,14 +126,14 @@ final class FindController {
               let m = re.firstMatch(in: b.text, options: [.withTransparentBounds], range: matches[i]) else { return }
         b.replace(m.range, with: options.replacement(for: m, in: b.text, with: replacement, using: re))
         b.selection = NSRange(location: m.range.location, length: 0)
-        update()
+        updateNow()
         if !matches.isEmpty { b.reveal = matches[current ?? 0] }
     }
 
     func replaceAll() {
         guard let b = buffer, let (text, n) = try? options.replaceAll(in: b.text, with: replacement), n > 0 else { return }
         b.replaceAll(with: text)  // one undo step
-        update()
+        updateNow()
     }
 }
 
@@ -112,7 +145,7 @@ struct FindBar: View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
                 Button { find.showReplace.toggle() } label: {
-                    Image(systemName: find.showReplace ? "chevron.down" : "chevron.right").frame(width: 12)
+                    Image(systemName: find.showReplace ? "chevron.down" : "chevron.right").hitTarget(width: 16)
                 }
                 .buttonStyle(.plain)
                 .help("Toggle Replace")
@@ -124,18 +157,18 @@ struct FindBar: View {
                     .foregroundStyle(find.invalid ? .red : .primary)
                 OptionToggles(options: $find.options)
                 Text(status).font(.caption).foregroundStyle(.secondary).monospacedDigit().frame(minWidth: 64)
-                Button { find.step(false) } label: { Image(systemName: "chevron.up") }.help("Previous (⇧⌘G)")
-                Button { find.step(true) } label: { Image(systemName: "chevron.down") }.help("Next (⌘G)")
-                Button { find.close() } label: { Image(systemName: "xmark") }.help("Close (Esc)")
+                Button { find.step(false) } label: { Image(systemName: "chevron.up").hitTarget() }.help("Previous (⇧⌘G)")
+                Button { find.step(true) } label: { Image(systemName: "chevron.down").hitTarget() }.help("Next (⌘G)")
+                Button { find.close() } label: { Image(systemName: "xmark").hitTarget() }.help("Close (Esc)")
             }
             if find.showReplace {
                 HStack(spacing: 6) {
-                    Spacer().frame(width: 12)
+                    Spacer().frame(width: 16)
                     TextField("Replace", text: $find.replacement)
                         .textFieldStyle(.roundedBorder)
                         .frame(width: 220)
                         .onSubmit { find.replaceCurrent() }
-                    Toggle("AB", isOn: $find.options.preserveCase).help("Preserve Case")
+                    Toggle("AB", isOn: $find.options.preserveCase).toggleStyle(OptionToggleStyle()).help("Preserve Case")
                     Button("Replace") { find.replaceCurrent() }
                     Button("All") { find.replaceAll() }.help("Replace All")
                 }
@@ -148,7 +181,14 @@ struct FindBar: View {
         .glassEffect(.regular, in: .rect(cornerRadius: 10))
         .padding(10)
         .onExitCommand { find.close() }
-        .onChange(of: find.focusToken, initial: true) { focused = true }
+        .onGeometryChange(for: CGRect.self, of: { $0.frame(in: .global) }) { find.barFrame = $0 }
+        .onDisappear { find.barFrame = .zero }
+        .task(id: find.focusToken) {
+            // Wait a runloop turn: the bar must be in the window, and the editor gives up focus first.
+            await Task.yield()
+            NSApp.keyWindow?.makeFirstResponder(nil)
+            focused = true
+        }
     }
 
     private var status: String {
@@ -167,7 +207,32 @@ struct OptionToggles: View {
             Toggle("ab", isOn: $options.wholeWord).underline().help("Match Whole Word")
             Toggle(".*", isOn: $options.regex).help("Use Regular Expression")
         }
-        .font(.system(size: 11, weight: .medium, design: .monospaced))
+        .toggleStyle(OptionToggleStyle())
+    }
+}
+
+/// VS Code-style option chip: the whole 26×22 box is clickable and shows an accent fill when on.
+struct OptionToggleStyle: ToggleStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        Button { configuration.isOn.toggle() } label: {
+            configuration.label
+                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                .foregroundStyle(configuration.isOn ? Color.accentColor : .secondary)
+                .hitTarget(width: 26)
+                .background(
+                    RoundedRectangle(cornerRadius: 5)
+                        .fill(configuration.isOn ? Color.accentColor.opacity(0.18) : .clear)
+                        .strokeBorder(configuration.isOn ? Color.accentColor.opacity(0.6) : .clear))
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(configuration.isOn ? .isSelected : [])
+    }
+}
+
+extension View {
+    /// Pad a small icon/label to a comfortable, fully clickable box.
+    func hitTarget(width: CGFloat = 24, height: CGFloat = 22) -> some View {
+        frame(width: width, height: height).contentShape(Rectangle())
     }
 }
 
