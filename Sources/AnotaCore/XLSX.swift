@@ -15,9 +15,9 @@ public enum XLSX {
     }
 
     /// Most cells one sheet may produce (rows × columns).
-    static let maxCells = 20_000_000
+    public static let maxCells = 20_000_000
 
-    public static func read(_ url: URL, rowLimit: Int = 200_000) throws -> [Sheet] {
+    public static func read(_ url: URL, rowLimit: Int = 200_000, maxCells: Int = maxCells) throws -> [Sheet] {
         let zip = try Zip(Data(contentsOf: url))
         let shared = try zip.file("xl/sharedStrings.xml").map(SharedStrings.parse) ?? []
         let dateStyles = try zip.file("xl/styles.xml").map(Styles.dateStyleIndexes) ?? []
@@ -27,7 +27,7 @@ public enum XLSX {
             guard let target = rels[rid] else { return nil }
             let path = target.hasPrefix("/") ? String(target.dropFirst()) : "xl/" + target
             guard let xml = try zip.file(path) else { return nil }
-            return Sheet(name: name, table: SheetParser.parse(xml, shared: shared, dateStyles: dateStyles, rowLimit: rowLimit))
+            return Sheet(name: name, table: SheetParser.parse(xml, shared: shared, dateStyles: dateStyles, rowLimit: rowLimit, maxCells: maxCells))
         }
     }
 
@@ -170,12 +170,12 @@ public enum XLSX {
     }
 
     enum SheetParser {
-        static func parse(_ data: Data, shared: [String], dateStyles: Set<Int>, rowLimit: Int) -> DataTable {
+        static func parse(_ data: Data, shared: [String], dateStyles: Set<Int>, rowLimit: Int, maxCells: Int) -> DataTable {
             final class H: Handler {
-                let shared: [String], dateStyles: Set<Int>, rowLimit: Int
+                let shared: [String], dateStyles: Set<Int>, rowLimit: Int, maxCells: Int
                 var rows: [[Int: String]] = [], row: [Int: String] = [:], width = 0, truncated = false
                 var col = 0, type = "", style = 0, text = "", inValue = false
-                init(_ s: [String], _ d: Set<Int>, _ l: Int) { shared = s; dateStyles = d; rowLimit = l }
+                init(_ s: [String], _ d: Set<Int>, _ l: Int, _ m: Int) { shared = s; dateStyles = d; rowLimit = l; maxCells = m }
                 func parser(_ p: XMLParser, didStartElement e: String, namespaceURI: String?, qualifiedName: String?, attributes a: [String: String]) {
                     switch e {
                     case "row": row = [:]
@@ -200,11 +200,17 @@ public enum XLSX {
                             if text.isEmpty { v = nil }
                             else if dateStyles.contains(style), let d = Double(text) { v = XLSX.date(d) }
                         }
-                        if let v { row[col] = v; width = max(width, col + 1) }
+                        if let v {
+                            // Cap when the width grows too, not only per row: one far-right cell would otherwise
+                            // widen every row already read.
+                            if (rows.count + 1) * max(width, col + 1) > maxCells { truncated = true; p.abortParsing(); return }
+                            row[col] = v
+                            width = max(width, col + 1)
+                        }
                     case "row":
                         // Cap rows and total cells (rows × width), so a sheet with a cell at XFD1048576 can't
                         // make us build a billions-of-cells grid.
-                        if rows.count >= rowLimit || rows.count * max(width, 1) >= XLSX.maxCells {
+                        if rows.count >= rowLimit || rows.count * max(width, 1) >= maxCells {
                             truncated = true; p.abortParsing(); return
                         }
                         rows.append(row)
@@ -212,9 +218,11 @@ public enum XLSX {
                     }
                 }
             }
-            let h = H(shared, dateStyles, rowLimit)
+            let h = H(shared, dateStyles, rowLimit, maxCells)
             Handler.run(data, h)
-            var grid = h.rows.map { r in (0..<h.width).map { r[$0] } }
+            // Last line of defence: never build more than maxCells, whatever the parser saw.
+            let keep = h.width == 0 ? h.rows.count : min(h.rows.count, maxCells / h.width)
+            var grid = h.rows.prefix(keep).map { r in (0..<h.width).map { r[$0] } }
             // First row is the header when it's all text (the usual layout); else generic letters.
             let header: [String]
             if let first = grid.first, !first.isEmpty, first.allSatisfy({ $0 != nil && Double($0!) == nil }) {
@@ -223,7 +231,7 @@ public enum XLSX {
             } else {
                 header = (0..<h.width).map(XLSX.letters)
             }
-            return DataTable(columns: header, rows: grid, truncated: h.truncated,
+            return DataTable(columns: header, rows: grid, truncated: h.truncated || keep < h.rows.count,
                              hasHeaderRow: header.count == h.width && h.width > 0 && grid.count < h.rows.count, letterNames: true)
         }
     }

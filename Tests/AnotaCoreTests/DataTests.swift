@@ -145,3 +145,12 @@ import Testing
     let db = try SQLiteDB(path: nil)
     #expect(try db.query("PRAGMA trusted_schema").rows.first?.first == "0")
 }
+
+@Test func xlsxCellCapHoldsWhenOneCellWidensTheSheet() throws {
+    // 10 narrow rows, then one cell in column XFD: without the width check this is 11 × 16,384 cells.
+    let url = try #require(Bundle.module.url(forResource: "wide", withExtension: "xlsx", subdirectory: "Fixtures"))
+    let t = try XLSX.read(url, maxCells: 50_000)[0].table
+    #expect(t.truncated)
+    #expect(t.rows.count * max(t.columns.count, 1) <= 50_000)
+    #expect(try XLSX.read(url)[0].table.columns.count == 16_384)  // within the default cap it reads fully
+}

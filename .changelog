@@ -8,7 +8,8 @@ A push to `main` that doesn't change `.version` is published as a pre-release `v
 Security hardening for the data viewer.
 
 - Hardening: malformed or hostile .xlsx files throw instead of crashing (ZIP offsets bounds-checked, part sizes and
-  compression ratio capped, column references limited to A…XFD, sheets capped at 20M cells); SQLite files open with
+  compression ratio capped, column references limited to A…XFD, sheets capped at 20M cells — also when a single far-right
+  cell widens the sheet); SQLite files open with
   `trusted_schema = OFF` and `query_only = ON`
 
 ## v0.3.0
