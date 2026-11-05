@@ -3,6 +3,14 @@
 Newest first. Each release's notes are the section whose heading matches `.version`.
 A push to `main` that doesn't change `.version` is published as a pre-release `v<version>-rc-<UTC datetime>`.
 
+## v0.3.1
+
+Security hardening for the data viewer.
+
+- Hardening: malformed or hostile .xlsx files throw instead of crashing (ZIP offsets bounds-checked, part sizes and
+  compression ratio capped, column references limited to A…XFD, sheets capped at 20M cells); SQLite files open with
+  `trusted_schema = OFF` and `query_only = ON`
+
 ## v0.3.0
 
 Data viewer (CSV, TSV, JSON Lines, SQLite, Excel), auto-closing pairs.
@@ -27,9 +35,6 @@ Data viewer (CSV, TSV, JSON Lines, SQLite, Excel), auto-closing pairs.
   closing bracket outdents; quotes don't pair after letters (don't), `<` pairs only in HTML/XML and for generics
 - Fix: a file opened from outside (Finder, Dock) didn't show as the active tab — the tab bar didn't track the
   active-tab change; files in the tree now also open on click, the tree highlight just follows the active tab
-- Hardening: malformed or hostile .xlsx files throw instead of crashing (ZIP offsets bounds-checked, part sizes and
-  compression ratio capped, column references limited to A…XFD, sheets capped at 20M cells); SQLite files open with
-  `trusted_schema = OFF` and `query_only = ON`
 - Fix: opening a file no longer flashes it uncoloured (normal-sized files are coloured before the first frame)
 - Fix: the toolbar's view-mode switch kept stale segments after switching to a file with fewer (or no) modes
 

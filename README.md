@@ -5,7 +5,7 @@
 A simple, fast code editor for macOS.
 Written in Swift (SwiftUI + AppKit).
 
-> Status: **v0.3.0**. Core features work and are unit-tested. See [`.changelog`](.changelog).
+> Status: **v0.3.1**. Core features work and are unit-tested. See [`.changelog`](.changelog).
 
 ## Features
 
@@ -167,12 +167,12 @@ Don't edit `Vendor/` or `Sources/AnotaCore/Queries/` by hand. Change `scripts/ve
 
 ## Versioning & releases
 
-- `.version` holds the version (`0.3.0`). It sets the app's version; the build number is the commit count.
+- `.version` holds the version (`0.3.1`). It sets the app's version; the build number is the commit count.
 - `.changelog` has a `## v<version>` section per release; that section becomes the release notes.
 - CI (`.github/workflows/ci.yml`) runs `swift test` and `scripts/make-app.sh` on every push and pull request.
   When both pass on `main`, it publishes a GitHub release with the zipped app:
   - `.version` changed (no `v<version>` tag yet) → release **`v<version>`**
-  - `.version` unchanged → pre-release **`v<version>-rc-<UTC YYYYMMDDHHMMSS>`**, e.g. `v0.3.0-rc-20261030101010`
+  - `.version` unchanged → pre-release **`v<version>-rc-<UTC YYYYMMDDHHMMSS>`**, e.g. `v0.3.1-rc-20261030101010`
 - To release a new version: bump `.version`, add its section to `.changelog`, push to `main`.
 
 ## Data & privacy
