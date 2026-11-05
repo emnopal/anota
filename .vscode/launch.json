@@ -1,0 +1,24 @@
+{
+    "configurations": [
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:anota}",
+            "name": "Debug Anota",
+            "target": "Anota",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug Anota"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:anota}",
+            "name": "Release Anota",
+            "target": "Anota",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release Anota"
+        }
+    ]
+}

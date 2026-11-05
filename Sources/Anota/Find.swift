@@ -1,0 +1,344 @@
+import AnotaCore
+import SwiftUI
+
+/// In-file find/replace (VS Code style). Works on the focused buffer; highlights every
+/// match with temporary attributes on each layout manager showing that buffer.
+@Observable
+final class FindController {
+    var visible = false
+    var showReplace = false
+    var options = SearchOptions() { didSet { if options != oldValue { update() } } }
+    var replacement = ""
+    var matches: [NSRange] = []
+    var current: Int?
+    var invalid = false
+    var focusToken = 0  // bump to focus the find field
+
+    @ObservationIgnored private weak var buffer: Buffer?
+    @ObservationIgnored private var highlighted: [NSRange] = []
+
+    func open(replace: Bool, buffer: Buffer?) {
+        if let b = buffer, b.selection.length > 0, b.selection.length < 200 {
+            let s = (b.text as NSString).substring(with: b.selection)
+            if !s.contains("\n") { options.query = s }
+        }
+        visible = true
+        showReplace = replace
+        attach(buffer)
+        focusToken += 1
+    }
+
+    func close() {
+        visible = false
+        clearHighlight()
+        matches = []
+        current = nil
+    }
+
+    func attach(_ b: Buffer?) {
+        guard b !== buffer else { return }
+        clearHighlight()
+        buffer = b
+        update()
+    }
+
+    func useSelection(_ b: Buffer?) {
+        guard let b, b.selection.length > 0 else { return }
+        options.query = (b.text as NSString).substring(with: b.selection)
+    }
+
+    /// Recompute matches (query/options/text changed).
+    func update() {
+        clearHighlight()
+        guard visible, let b = buffer, !options.query.isEmpty else { matches = []; current = nil; invalid = false; return }
+        guard let re = try? options.compile() else { matches = []; current = nil; invalid = true; return }
+        invalid = false
+        // ponytail: capped at 10K highlighted matches.
+        matches = Array(re.matches(in: b.text, range: NSRange(location: 0, length: b.storage.length))
+            .lazy.map(\.range).filter { $0.length > 0 }.prefix(10_000))
+        current = matches.firstIndex { $0.location >= b.selection.location } ?? (matches.isEmpty ? nil : 0)
+        highlight()
+    }
+
+    func highlight() {
+        clearHighlight()
+        guard visible, let b = buffer else { return }
+        let color = NSColor.findHighlightColor.withAlphaComponent(0.35)
+        for lm in b.storage.layoutManagers {
+            for r in matches { lm.addTemporaryAttribute(.backgroundColor, value: color, forCharacterRange: r) }
+        }
+        highlighted = matches
+    }
+
+    private func clearHighlight() {
+        guard let b = buffer, !highlighted.isEmpty else { return }
+        let full = NSRange(location: 0, length: b.storage.length)
+        for lm in b.storage.layoutManagers { lm.removeTemporaryAttribute(.backgroundColor, forCharacterRange: full) }
+        highlighted = []
+    }
+
+    func step(_ forward: Bool) {
+        guard !matches.isEmpty, let b = buffer else { NSSound.beep(); return }
+        let loc = b.selection.location
+        if forward {
+            current = matches.firstIndex { $0.location > loc } ?? 0
+        } else {
+            current = matches.lastIndex { $0.location < loc } ?? matches.count - 1
+        }
+        b.reveal = matches[current!]
+    }
+
+    func replaceCurrent() {
+        guard let b = buffer, let i = current, i < matches.count, let re = try? options.compile(),
+              let m = re.firstMatch(in: b.text, options: [.withTransparentBounds], range: matches[i]) else { return }
+        b.replace(m.range, with: options.replacement(for: m, in: b.text, with: replacement, using: re))
+        b.selection = NSRange(location: m.range.location, length: 0)
+        update()
+        if !matches.isEmpty { b.reveal = matches[current ?? 0] }
+    }
+
+    func replaceAll() {
+        guard let b = buffer, let (text, n) = try? options.replaceAll(in: b.text, with: replacement), n > 0 else { return }
+        b.replaceAll(with: text)  // one undo step
+        update()
+    }
+}
+
+struct FindBar: View {
+    @Bindable var find: FindController
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Button { find.showReplace.toggle() } label: {
+                    Image(systemName: find.showReplace ? "chevron.down" : "chevron.right").frame(width: 12)
+                }
+                .buttonStyle(.plain)
+                .help("Toggle Replace")
+                TextField("Find", text: $find.options.query)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 220)
+                    .focused($focused)
+                    .onSubmit { find.step(true) }
+                    .foregroundStyle(find.invalid ? .red : .primary)
+                OptionToggles(options: $find.options)
+                Text(status).font(.caption).foregroundStyle(.secondary).monospacedDigit().frame(minWidth: 64)
+                Button { find.step(false) } label: { Image(systemName: "chevron.up") }.help("Previous (⇧⌘G)")
+                Button { find.step(true) } label: { Image(systemName: "chevron.down") }.help("Next (⌘G)")
+                Button { find.close() } label: { Image(systemName: "xmark") }.help("Close (Esc)")
+            }
+            if find.showReplace {
+                HStack(spacing: 6) {
+                    Spacer().frame(width: 12)
+                    TextField("Replace", text: $find.replacement)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 220)
+                        .onSubmit { find.replaceCurrent() }
+                    Toggle("AB", isOn: $find.options.preserveCase).help("Preserve Case")
+                    Button("Replace") { find.replaceCurrent() }
+                    Button("All") { find.replaceAll() }.help("Replace All")
+                }
+            }
+        }
+        .buttonStyle(.borderless)
+        .toggleStyle(.button)
+        .controlSize(.small)
+        .padding(8)
+        .glassEffect(.regular, in: .rect(cornerRadius: 10))
+        .padding(10)
+        .onExitCommand { find.close() }
+        .onChange(of: find.focusToken, initial: true) { focused = true }
+    }
+
+    private var status: String {
+        if find.options.query.isEmpty { return "" }
+        if find.invalid { return "Bad regex" }
+        if find.matches.isEmpty { return "No results" }
+        return "\((find.current ?? 0) + 1) of \(find.matches.count)\(find.matches.count == 10_000 ? "+" : "")"
+    }
+}
+
+struct OptionToggles: View {
+    @Binding var options: SearchOptions
+    var body: some View {
+        HStack(spacing: 2) {
+            Toggle("Aa", isOn: $options.caseSensitive).help("Match Case")
+            Toggle("ab", isOn: $options.wholeWord).underline().help("Match Whole Word")
+            Toggle(".*", isOn: $options.regex).help("Use Regular Expression")
+        }
+        .font(.system(size: 11, weight: .medium, design: .monospaced))
+    }
+}
+
+// MARK: Find in files
+
+@Observable
+final class ProjectSearch {
+    var options = SearchOptions()
+    var replacement = ""
+    var include = ""
+    var exclude = ""
+    var results: [FileMatches] = []
+    var running = false
+    var error: String?
+    var focusToken = 0
+
+    @ObservationIgnored private var task: Task<Void, Never>?
+
+    var total: Int { results.reduce(0) { $0 + $1.matches.count } }
+
+    func run(root: URL?) {
+        task?.cancel()
+        error = nil
+        guard let root, !options.query.isEmpty else { results = []; running = false; return }
+        running = true
+        let (o, inc, exc) = (options, FileSearch.globs(include), FileSearch.globs(exclude))
+        task = Task {
+            do {
+                try await Task.sleep(for: .milliseconds(250))  // debounce typing
+                let r = try await FileSearch.search(root: root, options: o, include: inc, exclude: exc)
+                guard !Task.isCancelled else { return }
+                results = r
+            } catch is CancellationError {
+                return
+            } catch {
+                self.error = "Invalid search pattern"
+                results = []
+            }
+            running = false
+        }
+    }
+
+    /// Replace in every result file. Open buffers are edited in place (undoable, left unsaved);
+    /// other files are rewritten on disk.
+    func replaceAll(in ws: Workspace) {
+        let files = results
+        guard !files.isEmpty else { return }
+        let a = NSAlert()
+        a.messageText = "Replace \(total) occurrences in \(files.count) files with “\(replacement)”?"
+        a.informativeText = "Files that aren't open are changed on disk and can't be undone."
+        a.addButton(withTitle: "Replace")
+        a.addButton(withTitle: "Cancel")
+        guard a.runModal() == .alertFirstButtonReturn else { return }
+        var failed: [String] = []
+        for f in files {
+            if let b = ws.buffer(for: f.url) {
+                if let (text, n) = try? options.replaceAll(in: b.text, with: replacement), n > 0 { b.replaceAll(with: text) }
+            } else {
+                do {
+                    var file = try TextFile.read(f.url)
+                    file.text = try options.replaceAll(in: file.text, with: replacement).0
+                    try file.write(to: f.url)
+                } catch {
+                    failed.append(f.url.lastPathComponent)
+                }
+            }
+        }
+        if !failed.isEmpty { error = "Couldn't write: " + failed.joined(separator: ", ") }
+        run(root: ws.root)
+    }
+}
+
+struct SearchPanel: View {
+    @Bindable var ws: Workspace
+    @Bindable var search: ProjectSearch
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                TextField("Search", text: $search.options.query)
+                    .focused($focused)
+                OptionToggles(options: $search.options)
+            }
+            HStack {
+                TextField("Replace", text: $search.replacement)
+                Toggle("AB", isOn: $search.options.preserveCase).help("Preserve Case")
+                Button { search.replaceAll(in: ws) } label: { Image(systemName: "text.badge.checkmark") }
+                    .help("Replace All")
+                    .disabled(search.results.isEmpty)
+            }
+            TextField("Files to include (e.g. *.swift, src/*)", text: $search.include)
+            TextField("Files to exclude", text: $search.exclude)
+            HStack {
+                if search.running { ProgressView().controlSize(.mini) }
+                Text(summary).font(.caption).foregroundStyle(search.error == nil ? Color.secondary : Color.red)
+            }
+        }
+        .textFieldStyle(.roundedBorder)
+        .toggleStyle(.button)
+        .buttonStyle(.borderless)
+        .controlSize(.small)
+        .padding(.horizontal, 10)
+        .onChange(of: search.options) { search.run(root: ws.root) }
+        .onChange(of: search.include) { search.run(root: ws.root) }
+        .onChange(of: search.exclude) { search.run(root: ws.root) }
+        .onChange(of: search.focusToken, initial: true) { focused = true }
+
+        List {
+            ForEach(search.results) { f in
+                DisclosureGroup(isExpanded: .constant(true)) {
+                    ForEach(f.matches) { m in
+                        MatchRow(match: m, replacement: search.replacement.isEmpty ? nil : search.replacement)
+                            .contentShape(Rectangle())
+                            .onTapGesture { ws.reveal(f.url, m.range) }
+                    }
+                } label: {
+                    HStack {
+                        Label(f.url.lastPathComponent, systemImage: Language.detect(f.url).symbol)
+                        Text(relative(f.url)).foregroundStyle(.tertiary).lineLimit(1).truncationMode(.head)
+                        Spacer()
+                        Text("\(f.matches.count)").font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+            }
+        }
+        .listStyle(.sidebar)
+    }
+
+    private var summary: String {
+        if let e = search.error { return e }
+        if ws.root == nil { return "Open a folder to search in files." }
+        if search.options.query.isEmpty { return "" }
+        if search.running && search.results.isEmpty { return "Searching…" }
+        return "\(search.total) results in \(search.results.count) files"
+    }
+
+    private func relative(_ url: URL) -> String {
+        guard let root = ws.root?.standardizedFileURL.path else { return "" }
+        let dir = url.deletingLastPathComponent().standardizedFileURL.path
+        return dir.hasPrefix(root) ? String(dir.dropFirst(root.count)).trimmingCharacters(in: .init(charactersIn: "/")) : dir
+    }
+}
+
+struct MatchRow: View {
+    let match: LineMatch
+    let replacement: String?
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Text("\(match.line)").font(.caption2).foregroundStyle(.tertiary).monospacedDigit().frame(minWidth: 24, alignment: .trailing)
+            Text(attributed).lineLimit(1).font(.system(size: 11, design: .monospaced))
+        }
+    }
+
+    private var attributed: AttributedString {
+        let ns = match.lineText as NSString
+        let r = match.rangeInLine
+        let before = ns.substring(to: r.location)
+        let trimmed = before.drop { $0 == " " || $0 == "\t" }
+        var out = AttributedString(String(trimmed.suffix(40)))
+        var hit = AttributedString(ns.substring(with: r))
+        hit.backgroundColor = .yellow.opacity(0.35)
+        if let replacement {
+            hit.strikethroughStyle = .single
+            var new = AttributedString(replacement)
+            new.backgroundColor = .green.opacity(0.3)
+            hit += new
+        }
+        out += hit
+        out += AttributedString(ns.substring(from: NSMaxRange(r)))
+        return out
+    }
+}
