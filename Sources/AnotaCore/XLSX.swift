@@ -14,6 +14,9 @@ public enum XLSX {
         public var description: String { message }
     }
 
+    /// Most cells one sheet may produce (rows × columns).
+    static let maxCells = 20_000_000
+
     public static func read(_ url: URL, rowLimit: Int = 200_000) throws -> [Sheet] {
         let zip = try Zip(Data(contentsOf: url))
         let shared = try zip.file("xl/sharedStrings.xml").map(SharedStrings.parse) ?? []
@@ -49,8 +52,10 @@ public enum XLSX {
             guard eocd >= 0 else { throw Failure(message: "Not a ZIP file (corrupt or not .xlsx)") }
             var p = u32(eocd + 16)
             for _ in 0..<u16(eocd + 10) {
+                // Every offset comes from the file: check it before reading (malformed files must throw, not crash).
                 guard p + 46 <= bytes.count, u32(p) == 0x0201_4b50 else { throw Failure(message: "Corrupt ZIP directory") }
                 let nameLen = u16(p + 28), extra = u16(p + 30), comment = u16(p + 32)
+                guard p + 46 + nameLen + extra + comment <= bytes.count else { throw Failure(message: "Corrupt ZIP directory") }
                 let name = String(decoding: bytes[(p + 46)..<(p + 46 + nameLen)], as: UTF8.self)
                 entries[name] = (u32(p + 42), UInt16(u16(p + 10)), u32(p + 20), u32(p + 24))
                 p += 46 + nameLen + extra + comment
@@ -61,8 +66,9 @@ public enum XLSX {
             guard let e = entries[name] else { return nil }
             let bytes = data
             func u16(_ i: Int) -> Int { Int(bytes[bytes.startIndex + i]) | Int(bytes[bytes.startIndex + i + 1]) << 8 }
+            guard e.offset >= 0, e.offset + 30 <= bytes.count else { throw Failure(message: "Corrupt ZIP entry \(name)") }
             let start = e.offset + 30 + u16(e.offset + 26) + u16(e.offset + 28)  // skip the local header
-            guard start + e.compressed <= bytes.count else { throw Failure(message: "Corrupt ZIP entry \(name)") }
+            guard e.compressed >= 0, start + e.compressed <= bytes.count else { throw Failure(message: "Corrupt ZIP entry \(name)") }
             let raw = bytes.subdata(in: start..<(start + e.compressed))
             switch e.method {
             case 0: return raw
@@ -72,8 +78,15 @@ public enum XLSX {
         }
 
         /// Raw DEFLATE (Apple's COMPRESSION_ZLIB is headerless RFC 1951, which is what ZIP stores).
+        /// Largest part we'll inflate, and the most DEFLATE can expand (its hard limit is ~1032:1).
+        static let maxPartSize = 512 << 20, maxRatio = 1_100
+
         private func inflate(_ raw: Data, size: Int) throws -> Data {
             guard size > 0 else { return Data() }
+            // The size is declared by the file: refuse absurd ones before allocating (decompression bombs).
+            guard size <= Self.maxPartSize, size <= max(raw.count, 1) * Self.maxRatio else {
+                throw Failure(message: "Workbook part is too large to open")
+            }
             var out = Data(count: size)
             let n = out.withUnsafeMutableBytes { dst in
                 raw.withUnsafeBytes { src in
@@ -167,7 +180,7 @@ public enum XLSX {
                     switch e {
                     case "row": row = [:]
                     case "c":
-                        col = a["r"].map(XLSX.column) ?? (row.keys.max().map { $0 + 1 } ?? 0)
+                        col = a["r"].flatMap(XLSX.column) ?? min(row.keys.max().map { $0 + 1 } ?? 0, XLSX.maxColumns - 1)
                         type = a["t"] ?? "n"; style = a["s"].flatMap(Int.init) ?? 0; text = ""
                     case "v", "t": inValue = true
                     default: break
@@ -189,7 +202,11 @@ public enum XLSX {
                         }
                         if let v { row[col] = v; width = max(width, col + 1) }
                     case "row":
-                        if rows.count >= rowLimit { truncated = true; p.abortParsing(); return }
+                        // Cap rows and total cells (rows × width), so a sheet with a cell at XFD1048576 can't
+                        // make us build a billions-of-cells grid.
+                        if rows.count >= rowLimit || rows.count * max(width, 1) >= XLSX.maxCells {
+                            truncated = true; p.abortParsing(); return
+                        }
                         rows.append(row)
                     default: break
                     }
@@ -211,9 +228,17 @@ public enum XLSX {
         }
     }
 
-    /// "C12" → 2 (0-based column).
-    static func column(_ ref: String) -> Int {
-        ref.prefix { $0.isLetter }.uppercased().unicodeScalars.reduce(0) { $0 * 26 + Int($1.value) - 64 } - 1
+    /// Excel's limit: 16,384 columns (A…XFD).
+    static let maxColumns = 16_384
+
+    /// "C12" → 2 (0-based column); nil for anything outside A…XFD or not a column reference.
+    static func column(_ ref: String) -> Int? {
+        var n = 0
+        for u in ref.prefix(while: { $0.isASCII && $0.isLetter }).uppercased().unicodeScalars {
+            n = n * 26 + Int(u.value) - 64
+            if n > maxColumns { return nil }  // also stops overflow on absurd references
+        }
+        return n > 0 ? n - 1 : nil
     }
 
     /// 0 → "A", 26 → "AA".

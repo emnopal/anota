@@ -36,6 +36,11 @@ public final class SQLiteDB: @unchecked Sendable {  // used from one task at a t
             sqlite3_close(db)
             throw Failure(message: msg)
         }
+        // Untrusted files: don't let a database's own schema (views, triggers, defaults) call functions with side
+        // effects, and refuse writes on file databases even if a statement slips through. Extension loading stays
+        // off (the C API default; we never enable it).
+        try exec("PRAGMA trusted_schema = OFF")
+        if path != nil, readOnly { try exec("PRAGMA query_only = ON") }
     }
 
     deinit { sqlite3_close(db) }

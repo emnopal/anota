@@ -117,3 +117,31 @@ import Testing
     #expect(t.matching("CAFE", column: 1) == [1])
     #expect(t.matching("  ") == [0, 1, 2])
 }
+
+@Test func xlsxMalformedInputThrowsInsteadOfCrashing() throws {
+    let url = try #require(Bundle.module.url(forResource: "sample", withExtension: "xlsx", subdirectory: "Fixtures"))
+    let good = try Data(contentsOf: url)
+    let dir = FileManager.default.temporaryDirectory.appending(path: "anota-bad-\(UUID())")
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: dir) }
+    // Truncations at many points, and a directory whose name length points past the end.
+    var cases = stride(from: 1, to: good.count, by: max(good.count / 40, 1)).map { good.prefix($0) }
+    var bad = good
+    if let eocd = (0...(bad.count - 22)).reversed().first(where: { bad[$0] == 0x50 && bad[$0 + 1] == 0x4b && bad[$0 + 2] == 5 && bad[$0 + 3] == 6 }) {
+        let cd = Int(bad[eocd + 16]) | Int(bad[eocd + 17]) << 8 | Int(bad[eocd + 18]) << 16 | Int(bad[eocd + 19]) << 24
+        bad[cd + 28] = 0xff; bad[cd + 29] = 0xff  // nameLen = 65535
+        cases.append(bad)
+    }
+    for (i, d) in cases.enumerated() {
+        let f = dir.appending(path: "\(i).xlsx")
+        try d.write(to: f)
+        _ = try? XLSX.read(f)  // must return or throw, never trap
+    }
+    #expect(XLSX.column("XFD1") == 16_383 && XLSX.column("XFE1") == nil && XLSX.column(String(repeating: "Z", count: 40)) == nil)
+    #expect(XLSX.column("12") == nil)
+}
+
+@Test func sqliteUntrustedSchemaOff() throws {
+    let db = try SQLiteDB(path: nil)
+    #expect(try db.query("PRAGMA trusted_schema").rows.first?.first == "0")
+}
