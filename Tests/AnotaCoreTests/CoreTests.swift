@@ -31,7 +31,13 @@ import Testing
 
 @Test func detectLanguage() {
     #expect(Language.detect(URL(filePath: "/x/a.swift")) == .swift)
-    #expect(Language.detect(URL(filePath: "/x/.env.local")) == .ini)
+    #expect(Language.detect(URL(filePath: "/x/.env.local")) == .dotenv)
+    #expect(Language.detect(URL(filePath: "/x/prod.env")) == .dotenv)
+    #expect(Language.detect(URL(filePath: "/x/app.log")) == .log)
+    #expect(Language.detect(URL(filePath: "/x/app.log.3")) == .log)
+    #expect(Language.detect(URL(filePath: "/x/build.BAT")) == .batch)
+    #expect(Language.detect(URL(filePath: "/x/setup.ps1")) == .powershell)
+    #expect(Language.detect(URL(filePath: "/x/.zshrc")) == .shell)
     #expect(Language.detect(URL(filePath: "/x/Cargo.toml")) == .toml)
     #expect(Language.detect(nil) == .plain)
 }
@@ -95,7 +101,7 @@ private func pairs(_ lang: Language, _ text: String) -> [(String, Token)] {
 
 @Test func treeSitterLanguages() {
     let treeSitter: [Language] = [.json, .yaml, .toml, .ini, .python, .javascript, .typescript, .tsx,
-                                  .go, .c, .cpp, .rust, .swift]
+                                  .go, .c, .cpp, .rust, .swift, .shell]
     for lang in Language.allCases {
         #expect(Highlighter(lang).usesTreeSitter == treeSitter.contains(lang), "\(lang)")
     }
@@ -163,4 +169,79 @@ func codeGrammars(lang: Language, text: String, expected: [(String, Token)]) {
     for e in expected {
         #expect(p.contains { $0.0 == e.0 && $0.1 == e.1 }, "\(lang): \(e.0) should be \(e.1); got \(p)")
     }
+}
+
+@Test(arguments: [Language.python, .json, .rust])
+func incrementalParseMatchesFullParse(_ lang: Language) {
+    let samples: [Language: String] = [
+        .python: "def f(x):\n    return x + 1\n\nclass A:\n    pass\n",
+        .json: "{\"a\": 1, \"b\": [true, null], \"c\": \"s\"}\n",
+        .rust: "fn main() {\n    let x = 1;\n    println!(\"{}\", x);\n}\n",
+    ]
+    let text = NSMutableString(string: samples[lang]!)
+    let h = Highlighter(lang)
+    _ = h.update(text)
+    // Insert, delete and replace, each fed to the parser as NSTextStorage would report it.
+    let edits: [(NSRange, String)] = [(NSRange(location: 4, length: 0), "\"q\" # "), (NSRange(location: 0, length: 3), ""),
+                                      (NSRange(location: 10, length: 5), "\n\n// z\n")]
+    for (r, s) in edits {
+        text.replaceCharacters(in: r, with: s)
+        let len = (s as NSString).length
+        h.edited(NSRange(location: r.location, length: len), changeInLength: len - r.length, lines: LineIndex(text))
+        _ = h.update(text)
+        let full = NSRange(location: 0, length: text.length)
+        let incremental = h.tokens(in: text, range: full).map { "\($0.range)\($0.token)" }
+        let fresh = Highlighter(lang).tokens(in: text as String).map { "\($0.range)\($0.token)" }
+        #expect(incremental == fresh, "\(lang) after \(r)")
+    }
+}
+
+@Test func lineIndexLookups() {
+    let idx = LineIndex("ab\n\ncd\n" as NSString)
+    #expect(idx.lineCount == 4)
+    #expect(idx.line(at: 0) == 1 && idx.line(at: 2) == 1 && idx.line(at: 3) == 2 && idx.line(at: 4) == 3 && idx.line(at: 99) == 4)
+    #expect(idx.start(ofLine: 3) == 4)
+    let big = NSString(string: String(repeating: "x\n", count: 100_000))
+    #expect(LineIndex(big).lineCount == 100_001)
+}
+
+@Test func newLanguages() {
+    let log = pairs(.log, "2026-11-05 10:00:01,123 ERROR db: timeout\n10:00:02 WARN slow\nINFO ok 192.168.0.1:80\n    at x.y(Z.java:1)\n")
+    #expect(log.contains { $0 == ("2026-11-05 10:00:01,123", .type) })
+    #expect(log.contains { $0 == ("ERROR", .error) } && log.contains { $0 == ("WARN", .warning) } && log.contains { $0 == ("INFO", .info) })
+    #expect(log.contains { $0 == ("192.168.0.1:80", .number) })
+    #expect(log.contains { $0.0.hasPrefix("    at x.y") && $0.1 == .comment })
+
+    let env = pairs(.dotenv, "# c\nexport API_KEY=\"abc\"\nURL=${HOST}/x\nDEBUG=true\n")
+    #expect(env.contains { $0 == ("# c", .comment) } && env.contains { $0 == ("export", .keyword) })
+    #expect(env.contains { $0 == ("API_KEY", .key) } && env.contains { $0 == ("\"abc\"", .string) })
+    #expect(env.contains { $0 == ("${HOST}", .type) } && env.contains { $0 == ("true", .keyword) })
+
+    let bat = pairs(.batch, "@echo off\nREM note\n:loop\nset X=%1\nif exist %X% goto loop\n")
+    #expect(bat.contains { $0 == ("REM note", .comment) } && bat.contains { $0 == (":loop", .function) })
+    #expect(bat.contains { $0 == ("%X%", .type) } && bat.contains { $0 == ("goto", .keyword) })
+
+    let ps = pairs(.powershell, "<# doc #>\nfunction Get-X { param($Name) if ($Name -eq 'a') { Write-Host \"hi\" } } # c\n")
+    #expect(ps.contains { $0 == ("<# doc #>", .comment) } && ps.contains { $0 == ("$Name", .type) })
+    #expect(ps.contains { $0 == ("-eq", .keyword) } && ps.contains { $0 == ("Write-Host", .function) })
+
+    let sh = pairs(.shell, "#!/bin/zsh\nfor f in *.txt; do echo \"$f\"; done # c\n")
+    #expect(sh.contains { $0 == ("for", .keyword) } && sh.contains { $0 == ("echo", .function) })
+    #expect(sh.contains { $0 == ("# c", .comment) })
+}
+
+@Test func dotenvTree() {
+    let root = INI.parse("export A=1\nB='two'\n")
+    #expect(root.children.map(\.key) == ["A", "B"])
+}
+
+@Test func lineEdits() {
+    let code = "  a()\n\n    b()\n"
+    let c = LineEdits.toggleComment(code, prefix: "//")
+    #expect(c == "  // a()\n\n  //   b()\n")
+    #expect(LineEdits.toggleComment(c, prefix: "//") == code)
+    #expect(LineEdits.toggleComment("x\n", prefix: "<!--", suffix: "-->") == "<!-- x -->\n")
+    #expect(LineEdits.toggleComment("<!-- x -->\n", prefix: "<!--", suffix: "-->") == "x\n")
+    #expect(LineEdits.indent("a\n\nb", unit: "  ") == "  a\n\n  b")
+    #expect(LineEdits.indent("  a\n\tb\n c\n", unit: "    ", outdent: true) == "a\nb\nc\n")
 }

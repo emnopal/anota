@@ -3,6 +3,7 @@ import Foundation
 public enum Language: String, CaseIterable, Codable, Sendable, Identifiable {
     case plain, swift, python, javascript, typescript, tsx, json, yaml, toml, ini, markdown
     case html, xml, css, shell, c, cpp, rust, go, java, ruby, sql
+    case dotenv, log, batch, powershell
 
     public var id: String { rawValue }
 
@@ -15,7 +16,11 @@ public enum Language: String, CaseIterable, Codable, Sendable, Identifiable {
         case .json: "JSON"
         case .yaml: "YAML"
         case .toml: "TOML"
-        case .ini: "Config (INI/ENV)"
+        case .ini: "Config (INI)"
+        case .dotenv: "Environment (.env)"
+        case .shell: "Shell (Bash/Zsh)"
+        case .batch: "Batch"
+        case .powershell: "PowerShell"
         case .html: "HTML"
         case .xml: "XML"
         case .css: "CSS"
@@ -28,8 +33,11 @@ public enum Language: String, CaseIterable, Codable, Sendable, Identifiable {
     public static func detect(_ url: URL?) -> Language {
         guard let url else { return .plain }
         let name = url.lastPathComponent.lowercased()
-        if name.hasPrefix(".env") || [".editorconfig", ".gitconfig", ".npmrc", ".gitmodules"].contains(name) { return .ini }
-        if name == "makefile" || [".zshrc", ".bashrc", ".zprofile", ".bash_profile", ".profile"].contains(name) { return .shell }
+        if name.hasPrefix(".env") || name.hasSuffix(".env") { return .dotenv }
+        if [".editorconfig", ".gitconfig", ".npmrc", ".gitmodules"].contains(name) { return .ini }
+        if name == "makefile" || [".zshrc", ".zshenv", ".zprofile", ".zlogin", ".zlogout", ".bashrc", ".bash_profile",
+                                  ".bash_aliases", ".bash_logout", ".profile"].contains(name) { return .shell }
+        if name.contains(".log.") { return .log }  // rotated logs: app.log.1
         if name == "dockerfile" { return .shell }
         switch url.pathExtension.lowercased() {
         case "swift": return .swift
@@ -40,7 +48,11 @@ public enum Language: String, CaseIterable, Codable, Sendable, Identifiable {
         case "json", "jsonc", "json5", "geojson": return .json
         case "yml", "yaml": return .yaml
         case "toml": return .toml
-        case "ini", "cfg", "conf", "properties", "env": return .ini
+        case "ini", "cfg", "conf", "properties": return .ini
+        case "env": return .dotenv
+        case "log": return .log
+        case "bat", "cmd": return .batch
+        case "ps1", "psm1", "psd1": return .powershell
         case "md", "markdown", "mdown": return .markdown
         case "html", "htm", "vue", "svelte": return .html
         case "xml", "plist", "svg", "xib", "storyboard": return .xml

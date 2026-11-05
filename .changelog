@@ -3,6 +3,18 @@
 Newest first. Each release's notes are the section whose heading matches `.version`.
 A push to `main` that doesn't change `.version` is published as a pre-release `v<version>-rc-<UTC datetime>`.
 
+## v0.2.0
+
+Performance, more languages, VS Code shortcuts.
+
+- Long files: incremental tree-sitter parsing, colours as layout-manager temporary attributes (no relayout),
+  highlighting in slices, background first parse, O(log n) line numbers
+- Folder tree: background scanning, clicking a folder name expands it, expansion kept across refreshes
+- New: log files, .env (with tree view), Batch, PowerShell highlighting; Bash/Zsh via tree-sitter
+- Tabs: + button and double-click on the empty tab bar for a new file
+- VS Code shortcuts: line comment, move/copy/delete line, insert line, indent, ⌘L, ⌘D, Go to Line, tab cycling, ⌘1–3,
+  reopen closed tab, ⌘B / ⇧⌘E
+
 ## v0.1
 
 First release.

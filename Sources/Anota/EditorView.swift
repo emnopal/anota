@@ -26,6 +26,9 @@ enum Theme {
         case .link: .linkColor
         case .emphasis: .systemIndigo
         case .function: .systemCyan
+        case .error: .systemRed
+        case .warning: .systemOrange
+        case .info: .systemGreen
         }
     }
 }
@@ -44,6 +47,7 @@ struct EditorView: NSViewRepresentable {
         let lm = NSLayoutManager()
         lm.allowsNonContiguousLayout = true
         buffer.storage.addLayoutManager(lm)
+        buffer.highlightAll()  // colours are per layout manager
         let tc = NSTextContainer(size: NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude))
         lm.addTextContainer(tc)
 
@@ -51,13 +55,14 @@ struct EditorView: NSViewRepresentable {
         tv.configure()
         tv.delegate = context.coordinator
         tv.onFocus = onFocus
+        tv.buffer = buffer
 
         let scroll = NSScrollView()
         scroll.hasVerticalScroller = true
         scroll.autohidesScrollers = true
         scroll.borderType = .noBorder
         scroll.documentView = tv
-        scroll.verticalRulerView = LineNumberRuler(textView: tv, scrollView: scroll)
+        scroll.verticalRulerView = LineNumberRuler(textView: tv, scrollView: scroll) { [buffer] in buffer.lines }
         scroll.hasVerticalRuler = true
         scroll.rulersVisible = true
         context.coordinator.applyWrap(wrap, tv, scroll)
@@ -112,7 +117,7 @@ struct EditorView: NSViewRepresentable {
             let loc = tv.selectedRange().location
             let s = tv.string as NSString
             buffer.selection = tv.selectedRange()
-            buffer.caretLine = lineNumber(in: s, at: loc)
+            buffer.caretLine = buffer.lines.line(at: loc)
             buffer.caretColumn = loc - s.lineRange(for: NSRange(location: loc, length: 0)).location + 1
         }
 
@@ -136,6 +141,7 @@ struct EditorView: NSViewRepresentable {
 
 final class CodeTextView: NSTextView {
     var onFocus: (() -> Void)?
+    weak var buffer: Buffer?
 
     func configure() {
         isRichText = false
@@ -216,6 +222,135 @@ final class CodeTextView: NSTextView {
         return super.validateMenuItem(item)
     }
 
+    // MARK: VS Code-style line commands (wired to the Selection menu)
+
+    /// Full lines touched by the selection; a selection ending at a line start doesn't include that line.
+    private var selectedLines: NSRange {
+        let s = string as NSString
+        var sel = selectedRange()
+        if sel.length > 0, sel.location + sel.length <= s.length,
+           NSMaxRange(sel) > 0, s.character(at: NSMaxRange(sel) - 1) == 10 { sel.length -= 1 }
+        return s.lineRange(for: sel)
+    }
+
+    /// Undoable replace through the text view, so undo, highlighting and dirty state all follow.
+    private func edit(_ range: NSRange, _ text: String, select: NSRange) {
+        guard shouldChangeText(in: range, replacementString: text) else { return }
+        textStorage?.replaceCharacters(in: range, with: text)
+        didChangeText()
+        setSelectedRange(select)
+        scrollRangeToVisible(select)
+    }
+
+    private func substring(_ r: NSRange) -> String { (string as NSString).substring(with: r) }
+
+    @objc func toggleLineComment(_ sender: Any?) {
+        guard let c = buffer?.language.lineComment else { NSSound.beep(); return }
+        let r = selectedLines, old = substring(r)
+        let new = LineEdits.toggleComment(old, prefix: c.prefix, suffix: c.suffix)
+        edit(r, new, select: NSRange(location: r.location, length: (new as NSString).length - (new.hasSuffix("\n") ? 1 : 0)))
+    }
+
+    @objc func indentLines(_ sender: Any?) { reindent(outdent: false) }
+    @objc func outdentLines(_ sender: Any?) { reindent(outdent: true) }
+
+    private func reindent(outdent: Bool) {
+        let r = selectedLines, new = LineEdits.indent(substring(r), outdent: outdent)
+        edit(r, new, select: NSRange(location: r.location, length: (new as NSString).length - (new.hasSuffix("\n") ? 1 : 0)))
+    }
+
+    @objc func moveLinesUp(_ sender: Any?) { moveLines(up: true) }
+    @objc func moveLinesDown(_ sender: Any?) { moveLines(up: false) }
+
+    private func moveLines(up: Bool) {
+        let s = string as NSString, block = selectedLines, sel = selectedRange()
+        var blockText = substring(block)
+        if up {
+            guard block.location > 0 else { return }
+            let prev = s.lineRange(for: NSRange(location: block.location - 1, length: 0))
+            var prevText = substring(prev)
+            if !blockText.hasSuffix("\n") { blockText += "\n"; prevText.removeLast() }  // block was the last line
+            edit(NSUnionRange(prev, block), blockText + prevText,
+                 select: NSRange(location: sel.location - prev.length, length: sel.length))
+        } else {
+            guard NSMaxRange(block) < s.length else { return }
+            let next = s.lineRange(for: NSRange(location: NSMaxRange(block), length: 0))
+            var nextText = substring(next)
+            if !nextText.hasSuffix("\n") { nextText += "\n"; blockText.removeLast() }  // next is the last line
+            edit(NSUnionRange(block, next), nextText + blockText,
+                 select: NSRange(location: sel.location + (nextText as NSString).length, length: sel.length))
+        }
+    }
+
+    @objc func copyLinesUp(_ sender: Any?) { copyLines(up: true) }
+    @objc func copyLinesDown(_ sender: Any?) { copyLines(up: false) }
+
+    private func copyLines(up: Bool) {
+        let block = selectedLines, sel = selectedRange()
+        var text = substring(block)
+        if text.hasSuffix("\n") {
+            edit(NSRange(location: block.location, length: 0), text,
+                 select: up ? sel : NSRange(location: sel.location + block.length, length: sel.length))
+        } else {  // last line without a newline: append "\n" + copy
+            text = "\n" + text
+            edit(NSRange(location: NSMaxRange(block), length: 0), text,
+                 select: up ? sel : NSRange(location: sel.location + (text as NSString).length, length: sel.length))
+        }
+    }
+
+    @objc func deleteLines(_ sender: Any?) {
+        var r = selectedLines
+        if !substring(r).hasSuffix("\n"), r.location > 0 { r = NSRange(location: r.location - 1, length: r.length + 1) }
+        let s = string as NSString
+        let caret = min(r.location, s.length - r.length)
+        edit(r, "", select: NSRange(location: max(caret, 0), length: 0))
+    }
+
+    @objc func insertLineBelow(_ sender: Any?) { insertLine(above: false) }
+    @objc func insertLineAbove(_ sender: Any?) { insertLine(above: true) }
+
+    private func insertLine(above: Bool) {
+        let s = string as NSString
+        let line = s.lineRange(for: NSRange(location: selectedRange().location, length: 0))
+        let text = substring(line)
+        let indent = String(text.prefix { $0 == " " || $0 == "\t" })
+        let indentLen = (indent as NSString).length
+        if above {
+            edit(NSRange(location: line.location, length: 0), indent + "\n",
+                 select: NSRange(location: line.location + indentLen, length: 0))
+        } else {
+            let end = NSMaxRange(line) - (text.hasSuffix("\n") ? 1 : 0)
+            edit(NSRange(location: end, length: 0), "\n" + indent, select: NSRange(location: end + 1 + indentLen, length: 0))
+        }
+    }
+
+    /// ⌘L: select the current line; again extends to the next line.
+    @objc func expandLineSelection(_ sender: Any?) {
+        let s = string as NSString
+        var r = s.lineRange(for: selectedRange())
+        if r == selectedRange(), NSMaxRange(r) < s.length { r = NSUnionRange(r, s.lineRange(for: NSRange(location: NSMaxRange(r), length: 0))) }
+        setSelectedRange(r)
+        scrollRangeToVisible(r)
+    }
+
+    /// ⌘D: select the word at the caret; if something is selected, jump to its next occurrence (wrapping).
+    /// ponytail: single selection; VS Code adds a cursor per occurrence. Needs multi-cursor support.
+    @objc func selectNextOccurrence(_ sender: Any?) {
+        let s = string as NSString, sel = selectedRange()
+        if sel.length == 0 {
+            let word = selectionRange(forProposedRange: sel, granularity: .selectByWord)
+            if word.length > 0 { setSelectedRange(word) }
+            return
+        }
+        let needle = s.substring(with: sel)
+        var found = s.range(of: needle, range: NSRange(location: NSMaxRange(sel), length: s.length - NSMaxRange(sel)))
+        if found.location == NSNotFound { found = s.range(of: needle, range: NSRange(location: 0, length: sel.location)) }
+        guard found.location != NSNotFound else { NSSound.beep(); return }
+        setSelectedRange(found)
+        scrollRangeToVisible(found)
+        showFindIndicator(for: found)
+    }
+
     /// Auto-indent: keep the current line's leading whitespace.
     override func insertNewline(_ sender: Any?) {
         let s = string as NSString
@@ -254,9 +389,11 @@ final class CodeTextView: NSTextView {
 
 final class LineNumberRuler: NSRulerView {
     private weak var textView: NSTextView?
+    private let lines: () -> LineIndex
 
-    init(textView: NSTextView, scrollView: NSScrollView) {
+    init(textView: NSTextView, scrollView: NSScrollView, lines: @escaping () -> LineIndex) {
         self.textView = textView
+        self.lines = lines
         super.init(scrollView: scrollView, orientation: .verticalRuler)
         clientView = textView
         let nc = NotificationCenter.default
@@ -274,8 +411,7 @@ final class LineNumberRuler: NSRulerView {
     @objc private func redraw() { needsDisplay = true }
 
     @objc private func textChanged() {
-        let lines = textView.map { lineNumber(in: $0.string as NSString, at: ($0.string as NSString).length) } ?? 1
-        let digits = max(3, String(lines).count)
+        let digits = max(3, String(lines().lineCount).count)
         let width = CGFloat(digits) * ("8" as NSString).size(withAttributes: [.font: Theme.gutterFont]).width + 20
         if abs(ruleThickness - width) > 0.5 { ruleThickness = width }
         needsDisplay = true
@@ -292,7 +428,8 @@ final class LineNumberRuler: NSRulerView {
         let s = tv.string as NSString
         let chars = lm.characterRange(forGlyphRange: lm.glyphRange(forBoundingRect: tv.visibleRect, in: tc),
                                       actualGlyphRange: nil)
-        let caretLine = lineNumber(in: s, at: tv.selectedRange().location)
+        let index = lines()
+        let caretLine = index.line(at: tv.selectedRange().location)
         let originY = convert(NSPoint.zero, from: tv).y + tv.textContainerOrigin.y
 
         func draw(_ n: Int, _ frag: NSRect) {
@@ -308,7 +445,7 @@ final class LineNumberRuler: NSRulerView {
                        withAttributes: attrs)
         }
 
-        var line = lineNumber(in: s, at: chars.location)
+        var line = index.line(at: chars.location)
         var i = chars.location
         while i < NSMaxRange(chars) {
             let lr = s.lineRange(for: NSRange(location: i, length: 0))

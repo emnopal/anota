@@ -4,6 +4,7 @@ import TreeSitterGrammars
 
 public enum Token: Sendable, CaseIterable {
     case keyword, string, comment, number, type, key, heading, link, emphasis, function
+    case error, warning, info  // log levels
 }
 
 /// Turns text into colored token ranges. Uses tree-sitter when the language has a bundled grammar
@@ -42,12 +43,38 @@ public final class Highlighter: @unchecked Sendable {  // used from one actor at
         return 0
     }
 
-    /// Tokens ordered so that applying them in sequence lets inner ranges override outer ones.
+    /// One-shot: tokens for `text` from scratch (no incremental state). Used by tests and small callers.
     public func tokens(in text: String, range: NSRange? = nil) -> [(range: NSRange, token: Token)] {
-        let r = range ?? NSRange(location: 0, length: (text as NSString).length)
+        let ns = text as NSString
+        if case .treeSitter(let ts) = engine { ts.reset() }
+        _ = update(ns)
+        return tokens(in: ns, range: range ?? NSRange(location: 0, length: ns.length))
+    }
+
+    /// Forget the parse; the next `update` parses from scratch.
+    public func reset() {
+        if case .treeSitter(let ts) = engine { ts.reset() }
+    }
+
+    /// Record an edit (from NSTextStorage: `range` is the edited range in the new text, `delta` the
+    /// change in length) so the next `update` re-parses incrementally.
+    public func edited(_ range: NSRange, changeInLength delta: Int, lines: LineIndex) {
+        if case .treeSitter(let ts) = engine { ts.edited(range, delta: delta, lines: lines) }
+    }
+
+    /// Bring the parse up to date with `text`. Returns ranges whose highlighting may have changed
+    /// beyond the edited lines (e.g. an opened string or comment), tree-sitter only.
+    public func update(_ text: NSString) -> [NSRange] {
+        if case .treeSitter(let ts) = engine { return ts.update(text) }
+        return []
+    }
+
+    /// Tokens in `range` of the current parse (call `update` first), ordered so that applying them
+    /// in sequence lets inner ranges override outer ones.
+    public func tokens(in text: NSString, range: NSRange) -> [(range: NSRange, token: Token)] {
         switch engine {
-        case .treeSitter(let ts): return ts.tokens(in: text, range: r)
-        case .regex(let re, let tokens): return Self.regexTokens(re, tokens, text, r)
+        case .treeSitter(let ts): return ts.tokens(in: text, range: range)
+        case .regex(let re, let tokens): return Self.regexTokens(re, tokens, text as String, range)
         case .none: return []
         }
     }
@@ -70,12 +97,12 @@ public final class Highlighter: @unchecked Sendable {  // used from one actor at
     }
 }
 
-/// Full parse + highlights query per call.
-/// ponytail: re-parses the whole document each time (fast for config-sized files);
-/// switch to incremental `tree.edit` + reparse if large files lag.
+/// Incremental tree-sitter: edits are applied to the previous tree and only changed parts re-parse.
 private final class TreeSitterEngine {
     private let parser = Parser()
     private let query: Query
+    private var tree: MutableTree?
+    private var dirty = true
 
     init?(_ language: Language) {
         let grammar: OpaquePointer
@@ -93,6 +120,7 @@ private final class TreeSitterEngine {
         case .cpp: grammar = tree_sitter_cpp()
         case .rust: grammar = tree_sitter_rust()
         case .swift: grammar = tree_sitter_swift()
+        case .shell: grammar = tree_sitter_bash()
         default: return nil  // regex lexer (Markdown, HTML, CSS, shell, Java, Ruby, SQL…)
         }
         let lang = SwiftTreeSitter.Language(grammar)
@@ -103,15 +131,62 @@ private final class TreeSitterEngine {
         self.query = query
     }
 
-    func tokens(in text: String, range: NSRange) -> [(range: NSRange, token: Token)] {
-        guard let tree = parser.parse(text) else { return [] }
+    func reset() { tree = nil; dirty = true }
+
+    func edited(_ range: NSRange, delta: Int, lines: LineIndex) {
+        dirty = true
+        guard let tree else { return }
+        let start = range.location, newEnd = NSMaxRange(range), oldEnd = newEnd - delta
+        // UTF-16LE: byte = 2 × UTF-16 offset. The old end point is approximate (the old text is gone);
+        // highlighting works on byte offsets, which are exact.
+        let startPoint = point(start, lines)
+        let newEndPoint = point(newEnd, lines)
+        let oldEndPoint = Point(row: startPoint.row, column: startPoint.column + UInt32(max(oldEnd - start, 0) * 2))
+        tree.edit(InputEdit(startByte: start * 2, oldEndByte: max(oldEnd, start) * 2, newEndByte: newEnd * 2,
+                            startPoint: startPoint, oldEndPoint: oldEndPoint, newEndPoint: newEndPoint))
+    }
+
+    private func point(_ offset: Int, _ lines: LineIndex) -> Point {
+        let line = lines.line(at: offset)
+        return Point(row: UInt32(line - 1), column: UInt32((offset - lines.start(ofLine: line)) * 2))
+    }
+
+    func update(_ text: NSString) -> [NSRange] {
+        guard dirty else { return [] }
+        dirty = false
+        let old = tree
+        let length = text.length
+        // Read straight from the NSString's UTF-16 buffer in chunks: O(1) per chunk.
+        let new = parser.parse(tree: old, readBlock: { byte, _ in
+            let loc = byte / 2
+            guard loc < length else { return nil }
+            let n = min(16_384, length - loc)
+            var data = Data(count: n * 2)
+            data.withUnsafeMutableBytes { raw in
+                text.getCharacters(raw.baseAddress!.assumingMemoryBound(to: unichar.self), range: NSRange(location: loc, length: n))
+            }
+            return data
+        })
+        tree = new
+        guard let old, let new else { return [] }
+        return old.changedRanges(from: new).map {
+            NSRange(location: Int($0.bytes.lowerBound) / 2, length: Int($0.bytes.upperBound - $0.bytes.lowerBound) / 2)
+        }
+    }
+
+    func tokens(in text: NSString, range: NSRange) -> [(range: NSRange, token: Token)] {
+        if dirty { _ = update(text) }
+        guard let tree else { return [] }
         let cursor = query.execute(in: tree)
         cursor.setRange(range)
+        let context = Predicate.Context(textProvider: { r, _ in
+            NSMaxRange(r) <= text.length ? text.substring(with: r) : nil
+        })
         // One token per range. Upstream queries disagree on precedence (tree-sitter-json lists specific
         // patterns first, toml/yaml list them last), so: more specific capture name wins
         // (string.special.key > string), ties go to the later pattern.
         var best: [NSRange: (rank: (Int, Int), token: Token)] = [:]
-        for match in cursor.resolve(with: .init(string: text)) {
+        for match in cursor.resolve(with: context) {
             for c in match.captures {
                 guard let name = c.name, let t = Token(capture: name) else { continue }
                 let rank = (c.nameComponents.count, c.patternIndex)
@@ -208,6 +283,33 @@ extension Language {
             return [(block, .comment), (dq, .string), (sq, .string), (#"@[\w-]+"#, .keyword),
                     (#"[\w-]+(?=\s*:[^;{}\n]*[;}])"#, .key), (#"#[0-9a-fA-F]{3,8}\b"#, .number),
                     (#"-?\b\d+(?:\.\d+)?(?:px|em|rem|%|vh|vw|s|ms|deg)?\b"#, .number)]
+        case .dotenv:
+            return [(#"(?:^|(?<=\s))#[^\n]*"#, .comment), (kw("export"), .keyword),
+                    (#"[A-Za-z_][A-Za-z0-9_.]*(?=[ \t]*=)"#, .key), (dq, .string), (sq, .string),
+                    (#"\$\{[^}\n]*\}|\$\w+"#, .type), (kw("true false yes no on off null", caseInsensitive: true), .keyword), (num, .number)]
+        case .log:
+            return [(#"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:Z|[+-]\d{2}:?\d{2})?|\b\d{2}:\d{2}:\d{2}(?:[.,]\d+)?\b"#, .type),
+                    (kw("FATAL CRITICAL CRIT ERROR ERR SEVERE PANIC EMERG ALERT FAIL FAILED", caseInsensitive: true), .error),
+                    (#"\b[A-Za-z_.]+(?:Exception|Error)\b"#, .error),
+                    (kw("WARN WARNING", caseInsensitive: true), .warning),
+                    (kw("INFO NOTICE OK SUCCESS", caseInsensitive: true), .info),
+                    (kw("DEBUG TRACE VERBOSE FINE FINER FINEST", caseInsensitive: true), .comment),
+                    (#"^[ \t]+at [^\n]*"#, .comment),  // stack frames
+                    (#"\b[a-z][a-z0-9+.-]*://[^\s"'<>]+"#, .link), (dq, .string),
+                    (#"\b(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?\b"#, .number),
+                    (#"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b"#, .number), (num, .number)]
+        case .batch:
+            return [(#"(?i:^[ \t]*@?rem\b[^\n]*)|^[ \t]*::[^\n]*"#, .comment), (#"^:\w+"#, .function), (dq, .string),
+                    (#"%~?[\w:]+%|%%~?\w|![\w:]+!|%[0-9*]"#, .type),
+                    (kw("echo set setlocal endlocal if else goto call exit for in do not exist defined errorlevel equ neq lss leq gtr geq shift start cd pushd popd off on nul cls pause choice title", caseInsensitive: true), .keyword),
+                    (num, .number)]
+        case .powershell:
+            return [(#"<#[\s\S]*?#>"#, .comment), (#"#[^\n]*"#, .comment),
+                    (#"@"[\s\S]*?\n"@|@'[\s\S]*?\n'@"#, .string), (dq, .string), (sq, .string),
+                    (#"\$(?:\{[^}\n]*\}|[\w:?]+)"#, .type), (#"\[[\w.]+(?:\[\])?\]"#, .type),
+                    (kw("function param begin process end if elseif else switch foreach for while do until return break continue try catch finally throw trap filter class enum using in exit", caseInsensitive: true), .keyword),
+                    (#"(?i:-(?:eq|ne|gt|ge|lt|le|like|notlike|match|notmatch|contains|notcontains|in|notin|and|or|not|xor|replace|split|join|is|isnot|as|f)\b)"#, .keyword),
+                    (#"\b[A-Z][a-z]+-[A-Z][A-Za-z]+\b"#, .function), (num, .number)]
         case .shell:
             return [(#"(?:^|(?<=\s))#[^\n]*"#, .comment), (dq, .string), (sq, .string),
                     (kw("if then else elif fi for while until do done case esac function return export local in select readonly source alias unset shift exit"), .keyword),

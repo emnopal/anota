@@ -5,7 +5,9 @@ struct ContentView: View {
     @Bindable var ws: Workspace
 
     var body: some View {
-        NavigationSplitView {
+        NavigationSplitView(columnVisibility: Binding(
+            get: { ws.sidebarVisible ? .all : .detailOnly },
+            set: { ws.sidebarVisible = $0 != .detailOnly })) {
             Sidebar(ws: ws)
                 .navigationSplitViewColumnWidth(min: 180, ideal: 240, max: 400)
         } detail: {
@@ -90,14 +92,26 @@ struct Sidebar: View {
         let rows = ws.groups.reduce(0) { $0 + $1.tabs.count + 1 }
         return List {
             ForEach(Array(ws.groups.enumerated()), id: \.element.id) { i, g in
-                Section(ws.groups.count > 1 ? "Tabs · Group \(i + 1)" : "Tabs") {
+                Section {
                     ForEach(g.tabs) { b in VerticalTabRow(ws: ws, group: g, buffer: b) }
                         .onMove { from, to in g.tabs.move(fromOffsets: from, toOffset: to); ws.scheduleSave() }
+                    // Empty strip under the tabs: double-click for a new file, like the horizontal bar.
+                    Color.clear
+                        .frame(height: 14)
+                        .contentShape(Rectangle())
+                        .onTapGesture(count: 2) { ws.newFile(in: g) }
+                        .help("Double-click for a new file")
+                } header: {
+                    HStack {
+                        Text(ws.groups.count > 1 ? "Tabs · Group \(i + 1)" : "Tabs")
+                        Spacer()
+                        NewTabButton { ws.newFile(in: g) }
+                    }
                 }
             }
         }
         .listStyle(.sidebar)
-        .frame(height: min(CGFloat(rows) * 26 + 12, 260))
+        .frame(height: min(CGFloat(rows) * 26 + 12 + CGFloat(ws.groups.count) * 14, 280))
     }
 
     private var files: some View {
@@ -118,24 +132,35 @@ struct Sidebar: View {
             }
         }
         .onChange(of: ws.treeSelection) { _, url in
-            if let url, (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) != true { ws.open(url) }
+            guard let url else { return }
+            if let node = ws.tree?.find(url), node.isDirectory {
+                // Clicking a folder's name toggles it (before, only the small chevron did, so clicks
+                // on the name looked like the folder "randomly" refused to open).
+                node.expanded.toggle()
+                ws.treeSelection = nil
+            } else {
+                ws.open(url)
+            }
         }
     }
 }
 
 struct FileRow: View {
-    let node: FileNode
-    @State private var expanded = false
+    @Bindable var node: FileNode
 
     var body: some View {
         if node.isDirectory {
-            DisclosureGroup(isExpanded: $expanded) {
-                ForEach(node.children ?? []) { FileRow(node: $0) }
+            DisclosureGroup(isExpanded: $node.expanded) {
+                if let kids = node.children {
+                    ForEach(kids) { FileRow(node: $0) }
+                } else {
+                    ProgressView().controlSize(.small)
+                }
             } label: {
                 Label(node.url.lastPathComponent, systemImage: "folder")
             }
             .tag(node.url)
-            .onChange(of: expanded) { _, open in if open && node.children == nil { node.load() } }
+            .onChange(of: node.expanded) { _, open in if open && node.children == nil { node.load() } }
         } else {
             Label(node.url.lastPathComponent, systemImage: Language.detect(node.url).symbol)
                 .tag(node.url)
@@ -182,6 +207,7 @@ struct VerticalTabRow: View {
 struct TabBar: View {
     let ws: Workspace
     let group: EditorGroup
+    @State private var width: CGFloat = 0
 
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
@@ -197,16 +223,37 @@ struct TabBar: View {
                         }
                         .contextMenu { TabContextMenu(ws: ws, group: group, buffer: b) }
                 }
+                NewTabButton { ws.newFile(in: group) }  // like a browser's "+", right after the last tab
+                // The empty rest of the strip: double-click for a new file.
+                Color.clear
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .contentShape(Rectangle())
+                    .onTapGesture(count: 2) { ws.newFile(in: group) }
             }
             .padding(.horizontal, 6)
+            .frame(minWidth: width, maxHeight: .infinity, alignment: .leading)
         }
         .frame(height: 34)
         .frame(maxWidth: .infinity, alignment: .leading)
+        .onGeometryChange(for: CGFloat.self, of: { $0.size.width }) { width = $0 }
         .dropDestination(for: String.self) { items, _ in
             guard let id = items.first.flatMap(UUID.init) else { return false }
             ws.move(id, to: group)
             return true
         }
+    }
+}
+
+/// "New file" in a tab strip: the empty-document icon from the empty editor, with a plus.
+struct NewTabButton: View {
+    let action: () -> Void
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "doc.badge.plus").hitTarget(width: 26, height: 24)
+        }
+        .buttonStyle(.borderless)
+        .foregroundStyle(.secondary)
+        .help("New File (⌘N) — or double-click an empty part of the tab bar")
     }
 }
 
@@ -498,6 +545,9 @@ extension Language {
         case .json: "curlybraces"
         case .markdown: "text.alignleft"
         case .yaml, .toml, .ini: "gearshape"
+        case .dotenv: "key"
+        case .log: "list.bullet.rectangle"
+        case .batch, .powershell: "terminal.fill"
         case .html, .xml: "chevron.left.forwardslash.chevron.right"
         case .shell: "terminal"
         case .css: "paintbrush"

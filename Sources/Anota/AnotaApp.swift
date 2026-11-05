@@ -44,6 +44,8 @@ struct AppCommands: Commands {
             Button("New File") { ws.newFile() }.keyboardShortcut("n")
             Button("Open…") { ws.openPanel() }.keyboardShortcut("o")
             Divider()
+            Button("Reopen Closed Tab") { ws.reopenClosed() }.keyboardShortcut("t", modifiers: [.command, .shift])
+            Divider()
             Button("Close Tab") { ws.closeActive() }.keyboardShortcut("w")
             Button("Close All Tabs") { ws.groups.forEach(ws.closeAll) }.keyboardShortcut("w", modifiers: [.command, .option])
         }
@@ -77,6 +79,10 @@ struct AppCommands: Commands {
             Button("Minify JSON") { ws.minifyJSON() }
         }
         CommandGroup(after: .sidebar) {
+            Button("Toggle Sidebar") { ws.sidebarVisible.toggle() }.keyboardShortcut("b")
+            Button("Show Explorer") { ws.sidebarVisible = true; ws.sidebarMode = .files }
+                .keyboardShortcut("e", modifiers: [.command, .shift])
+            Divider()
             Toggle("Vertical Tabs", isOn: Binding(get: { ws.verticalTabs }, set: { ws.verticalTabs = $0 }))
                 .keyboardShortcut("t", modifiers: [.command, .option])
             Toggle("Word Wrap", isOn: Binding(get: { ws.wrap }, set: { ws.wrap = $0 }))
@@ -89,5 +95,40 @@ struct AppCommands: Commands {
             .keyboardShortcut("v", modifiers: [.command, .shift])
             Divider()
         }
+        // VS Code editing shortcuts. Sent down the responder chain to the focused editor (CodeTextView).
+        CommandMenu("Selection") {
+            line("Toggle Line Comment", #selector(CodeTextView.toggleLineComment(_:)), "/")
+            Divider()
+            line("Expand Line Selection", #selector(CodeTextView.expandLineSelection(_:)), "l")
+            line("Select Next Occurrence", #selector(CodeTextView.selectNextOccurrence(_:)), "d")
+            Divider()
+            line("Copy Line Up", #selector(CodeTextView.copyLinesUp(_:)), .upArrow, [.option, .shift])
+            line("Copy Line Down", #selector(CodeTextView.copyLinesDown(_:)), .downArrow, [.option, .shift])
+            line("Move Line Up", #selector(CodeTextView.moveLinesUp(_:)), .upArrow, .option)
+            line("Move Line Down", #selector(CodeTextView.moveLinesDown(_:)), .downArrow, .option)
+            line("Delete Line", #selector(CodeTextView.deleteLines(_:)), "k", [.command, .shift])
+            Divider()
+            line("Insert Line Below", #selector(CodeTextView.insertLineBelow(_:)), .return)
+            line("Insert Line Above", #selector(CodeTextView.insertLineAbove(_:)), .return, [.command, .shift])
+            line("Indent Line", #selector(CodeTextView.indentLines(_:)), "]")
+            line("Outdent Line", #selector(CodeTextView.outdentLines(_:)), "[")
+        }
+        CommandMenu("Go") {
+            Button("Go to Line…") { ws.goToLine() }.keyboardShortcut("g", modifiers: .control)
+            Divider()
+            Button("Next Tab") { ws.cycleTab(1) }.keyboardShortcut(.tab, modifiers: .control)
+            Button("Previous Tab") { ws.cycleTab(-1) }.keyboardShortcut(.tab, modifiers: [.control, .shift])
+            Button("Next Tab ") { ws.cycleTab(1) }.keyboardShortcut(.rightArrow, modifiers: [.command, .option])
+            Button("Previous Tab ") { ws.cycleTab(-1) }.keyboardShortcut(.leftArrow, modifiers: [.command, .option])
+            Divider()
+            ForEach(1...3, id: \.self) { n in
+                Button("Focus Editor Group \(n)") { ws.focusGroup(n) }.keyboardShortcut(KeyEquivalent(Character("\(n)")))
+            }
+        }
+    }
+
+    private func line(_ title: String, _ action: Selector, _ key: KeyEquivalent,
+                      _ modifiers: EventModifiers = .command) -> some View {
+        Button(title) { NSApp.sendAction(action, to: nil, from: nil) }.keyboardShortcut(key, modifiers: modifiers)
     }
 }

@@ -68,6 +68,3 @@ public func modificationDate(_ url: URL) -> Date? {
 }
 
 /// 1-based line number of the UTF-16 offset `location`.
-public func lineNumber(in text: NSString, at location: Int) -> Int {
-    (text as String).utf16.prefix(location).reduce(1) { $1 == 10 ? $0 + 1 : $0 }
-}

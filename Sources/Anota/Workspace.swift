@@ -30,6 +30,22 @@ final class Buffer: NSObject, Identifiable {
     @ObservationIgnored var onEdit: ((Buffer) -> Void)?
     @ObservationIgnored private var highlighter: Highlighter
     @ObservationIgnored private var loading = false
+    @ObservationIgnored private var lineCache: LineIndex?
+    @ObservationIgnored private var restyleQueue: [NSRange] = []  // ranges still to colour, most urgent first
+    @ObservationIgnored private var restyleScheduled = false
+    @ObservationIgnored private var restyleWork: DispatchWorkItem?
+    @ObservationIgnored private var parsingInBackground = false
+    @ObservationIgnored private var editedDuringParse = false
+    /// Above this size a tree-sitter re-parse costs ~100 ms, so it waits for a pause in typing.
+    private static let bigText = 300_000
+
+    /// Line-start index of the current text, rebuilt lazily after edits.
+    var lines: LineIndex {
+        if let l = lineCache, l.length == storage.length { return l }
+        let l = LineIndex(storage.string as NSString)
+        lineCache = l
+        return l
+    }
 
     enum ViewMode: String, CaseIterable { case text, tree, preview, split }
 
@@ -39,14 +55,14 @@ final class Buffer: NSObject, Identifiable {
 
     var modes: [ViewMode] {
         if language == .markdown { return [.text, .split, .preview] }
-        if [.json, .yaml, .toml, .ini].contains(language) || isPlist { return [.text, .tree] }
+        if [.json, .yaml, .toml, .ini, .dotenv].contains(language) || isPlist { return [.text, .tree] }
         return [.text]
     }
 
     func parseTree() throws -> Node {
         if isPlist { return try Plist.parse(text) }
         switch language {
-        case .ini: return INI.parse(text)
+        case .ini, .dotenv: return INI.parse(text)
         case .yaml: return try YAML.parse(text)
         case .toml: return try TOML.parse(text)
         default: return try JSON.parse(text)
@@ -91,7 +107,7 @@ final class Buffer: NSObject, Identifiable {
 
     func setText(_ text: String) {
         loading = true
-        storage.replaceCharacters(in: NSRange(location: 0, length: storage.length), with: text)
+        storage.setAttributedString(NSAttributedString(string: text, attributes: Theme.baseAttributes))
         loading = false
         undoManager.removeAllActions()
     }
@@ -120,26 +136,97 @@ final class Buffer: NSObject, Identifiable {
         onEdit?(self)
     }
 
-    private func highlightAll() {
-        storage.beginEditing()
-        applyHighlight(NSRange(location: 0, length: storage.length))
-        storage.endEditing()
-    }
+    // MARK: Highlighting
+    // Colours are layout-manager *temporary* attributes, not text-storage attributes: changing them only
+    // redraws, never re-lays-out text, which is what kept long files slow. Work is queued and done in
+    // ~100K-character slices per run-loop turn, so opening or editing a huge file never blocks typing.
 
-    /// ponytail: whole-document rehighlight under 150K chars, else only the edited lines
-    /// (multi-line comments/strings in huge files may color stale until the next edit nearby).
-    fileprivate func rehighlight(around edited: NSRange) {
-        let range = storage.length < 150_000
-            ? NSRange(location: 0, length: storage.length)
-            : (storage.string as NSString).lineRange(for: edited)
-        applyHighlight(range)
-    }
-
-    private func applyHighlight(_ range: NSRange) {
-        storage.setAttributes(Theme.baseAttributes, range: range)
-        for t in highlighter.tokens(in: storage.string, range: range) {
-            storage.addAttribute(.foregroundColor, value: Theme.color(t.token), range: t.range)
+    /// Recolour everything (language change, a new editor view on this buffer).
+    func highlightAll() {
+        restyleQueue = [NSRange(location: 0, length: storage.length)]
+        if highlighter.usesTreeSitter, storage.length > Self.bigText, !parsingInBackground {
+            // First parse of a big file (~1 s per 5 MB) runs off the main thread; edits meanwhile are
+            // noted and force a fresh parse afterwards.
+            parsingInBackground = true
+            editedDuringParse = false
+            let h = highlighter
+            // A real copy (storage.string is a live view of the mutable text). Immutable, so sharing is safe.
+            nonisolated(unsafe) let snapshot = storage.mutableString.copy() as! NSString
+            Task {
+                _ = await Task.detached { h.update(snapshot) }.value
+                parsingInBackground = false
+                if editedDuringParse || h !== highlighter { highlighter.reset() }
+                scheduleRestyle()
+            }
+            return
         }
+        scheduleRestyle()
+    }
+
+    private func scheduleRestyle(after delay: TimeInterval = 0) {
+        if delay > 0 {
+            // Debounce: re-arm on every keystroke, run once typing pauses.
+            restyleWork?.cancel()
+            let work = DispatchWorkItem { [weak self] in self?.drainRestyle() }
+            restyleWork = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+            return
+        }
+        guard !restyleScheduled else { return }
+        restyleScheduled = true
+        DispatchQueue.main.async { [weak self] in self?.drainRestyle() }
+    }
+
+    private func drainRestyle() {
+        restyleScheduled = false
+        guard !parsingInBackground else { return }  // resumes when the background parse lands
+        let text = storage.string as NSString
+        let length = text.length
+        restyleQueue.append(contentsOf: highlighter.update(text))
+        var budget = 100_000
+        while budget > 0, !restyleQueue.isEmpty {
+            let r = NSIntersectionRange(restyleQueue.removeFirst(), NSRange(location: 0, length: length))
+            guard r.length > 0 || length == 0 else { continue }
+            var slice = r
+            if r.length > budget {
+                // Cut at a line end, put the rest back at the front.
+                let cut = NSMaxRange(text.lineRange(for: NSRange(location: r.location + budget, length: 0)))
+                slice = NSRange(location: r.location, length: min(cut, NSMaxRange(r)) - r.location)
+                if NSMaxRange(slice) < NSMaxRange(r) {
+                    restyleQueue.insert(NSRange(location: NSMaxRange(slice), length: NSMaxRange(r) - NSMaxRange(slice)), at: 0)
+                }
+            }
+            applyHighlight(slice, text)
+            budget -= max(slice.length, 1)
+        }
+        if !restyleQueue.isEmpty { scheduleRestyle() }
+    }
+
+    private func applyHighlight(_ range: NSRange, _ text: NSString) {
+        let tokens = highlighter.tokens(in: text, range: range)
+        for lm in storage.layoutManagers {
+            lm.removeTemporaryAttribute(.foregroundColor, forCharacterRange: range)
+            for t in tokens {
+                lm.addTemporaryAttribute(.foregroundColor, value: Theme.color(t.token), forCharacterRange: t.range)
+            }
+        }
+    }
+
+    /// Text changed: tell the parser, shift queued work, and queue the edited lines first.
+    fileprivate func noteEdit(_ edited: NSRange, delta: Int) {
+        lineCache = nil
+        if parsingInBackground {
+            editedDuringParse = true
+        } else if highlighter.usesTreeSitter {
+            highlighter.edited(edited, changeInLength: delta, lines: lines)
+        }
+        let oldEnd = NSMaxRange(edited) - delta
+        restyleQueue = restyleQueue.map { r in
+            r.location >= oldEnd ? NSRange(location: max(r.location + delta, 0), length: r.length) : r
+        }
+        let ns = storage.string as NSString
+        restyleQueue.insert(ns.lineRange(for: NSRange(location: edited.location, length: min(edited.length, ns.length - edited.location))), at: 0)
+        scheduleRestyle(after: highlighter.usesTreeSitter && ns.length > Self.bigText ? 0.25 : 0)
     }
 }
 
@@ -147,7 +234,7 @@ extension Buffer: @preconcurrency NSTextStorageDelegate {
     func textStorage(_ textStorage: NSTextStorage, didProcessEditing editedMask: NSTextStorageEditActions,
                      range editedRange: NSRange, changeInLength delta: Int) {
         guard editedMask.contains(.editedCharacters) else { return }
-        rehighlight(around: editedRange)
+        noteEdit(editedRange, delta: delta)
         revision += 1
         if !loading { markEdited() }
     }
@@ -174,12 +261,17 @@ final class EditorGroup: Identifiable {
     }
 }
 
+/// A file-tree node. Folders scan in the background; `expanded` lives here (not in view @State) so it
+/// survives row reuse and refreshes.
 @Observable
 final class FileNode: Identifiable {
-    static let hidden: Set<String> = [".git", ".DS_Store", "node_modules", ".build", ".swiftpm", ".hg", ".svn"]
+    nonisolated static let hidden: Set<String> = [".git", ".DS_Store", "node_modules", ".build", ".swiftpm", ".hg", ".svn"]
     let url: URL
     let isDirectory: Bool
     var children: [FileNode]?  // nil until expanded
+    var expanded = false        // kept on the node so it survives refreshes and row reuse
+    @ObservationIgnored private var scannedDate: Date?
+    @ObservationIgnored private var scanning = false
     var id: URL { url }
 
     init(url: URL, isDirectory: Bool) {
@@ -187,22 +279,41 @@ final class FileNode: Identifiable {
         self.isDirectory = isDirectory
     }
 
-    func load() { children = scan() }
-
-    /// Re-scan already-loaded folders, keeping existing nodes (and their expansion state).
-    func refresh() {
-        guard let old = children else { return }
-        let byURL = Dictionary(old.map { ($0.url, $0) }, uniquingKeysWith: { a, _ in a })
-        children = scan().map { byURL[$0.url] ?? $0 }
-        children?.forEach { $0.refresh() }
+    /// Scan off the main thread; no-op while a scan is in flight.
+    func load() {
+        guard !scanning else { return }
+        scanning = true
+        let url = url
+        Task {
+            let (entries, date) = await Task.detached { (Self.scan(url), modificationDate(url)) }.value
+            scanning = false
+            scannedDate = date
+            let byURL = Dictionary((children ?? []).map { ($0.url, $0) }, uniquingKeysWith: { a, _ in a })
+            children = entries.map { byURL[$0.url] ?? FileNode(url: $0.url, isDirectory: $0.isDirectory) }
+        }
     }
 
-    private func scan() -> [FileNode] {
+    /// Re-scan loaded folders whose modification date changed (adding/removing an entry bumps it),
+    /// keeping existing nodes so expansion state survives.
+    func refresh() {
+        guard let kids = children else { return }
+        if modificationDate(url) != scannedDate { load() }
+        kids.forEach { $0.refresh() }
+    }
+
+    /// The loaded node for `target`, if its folder chain is loaded.
+    func find(_ target: URL) -> FileNode? {
+        if url == target { return self }
+        guard target.path.hasPrefix(url.path + "/") else { return nil }
+        return children?.lazy.compactMap { $0.find(target) }.first
+    }
+
+    nonisolated private static func scan(_ url: URL) -> [(url: URL, isDirectory: Bool)] {
         let urls = (try? FileManager.default.contentsOfDirectory(
             at: url, includingPropertiesForKeys: [.isDirectoryKey])) ?? []
         return urls
-            .filter { !Self.hidden.contains($0.lastPathComponent) }
-            .map { FileNode(url: $0, isDirectory: (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true) }
+            .filter { !hidden.contains($0.lastPathComponent) }
+            .map { ($0, (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true) }
             .sorted {
                 $0.isDirectory != $1.isDirectory ? $0.isDirectory
                     : $0.url.lastPathComponent.localizedStandardCompare($1.url.lastPathComponent) == .orderedAscending
@@ -225,6 +336,8 @@ final class Workspace {
         }
     }
     var tree: FileNode?
+    var sidebarVisible = true
+    @ObservationIgnored private var closedURLs: [URL] = []  // ⇧⌘T, most recent last
     var treeSelection: URL?
     var groups: [EditorGroup] = [EditorGroup()]
     var focusedID: UUID?
@@ -258,7 +371,9 @@ final class Workspace {
 
     // MARK: Files
 
-    func newFile() {
+    /// New untitled tab in `group` (default: the focused pane), which becomes focused.
+    func newFile(in group: EditorGroup? = nil) {
+        if let group { focusedID = group.id }
         let b = Buffer(url: nil)
         attach(b)
         focusedGroup.show(b)
@@ -431,9 +546,56 @@ final class Workspace {
             default: return
             }
         }
+        if let url = b.url, !elsewhere { closedURLs.removeAll { $0 == url }; closedURLs.append(url) }
         g.remove(b)
         dropIfEmpty(g)
         scheduleSave()
+    }
+
+    // MARK: VS Code-style navigation
+
+    /// ⇧⌘T: reopen the most recently closed file.
+    func reopenClosed() {
+        while let url = closedURLs.popLast() {
+            if FileManager.default.fileExists(atPath: url.path) { open(url); return }
+        }
+        NSSound.beep()
+    }
+
+    /// ⌃Tab / ⌥⌘→ and back: cycle tabs in the focused pane.
+    func cycleTab(_ step: Int) {
+        let g = focusedGroup
+        guard let a = g.active, let i = g.tabs.firstIndex(of: a), g.tabs.count > 1 else { return }
+        g.active = g.tabs[(i + step + g.tabs.count) % g.tabs.count]
+    }
+
+    /// ⌘1…⌘9: focus pane n (1-based), creating the next one like VS Code when n is one past the end.
+    func focusGroup(_ n: Int) {
+        if n == groups.count + 1 { split(); return }
+        guard groups.indices.contains(n - 1) else { return }
+        focusedID = groups[n - 1].id
+    }
+
+    /// ⌃G: prompt for a line (optionally line:column) and jump there.
+    func goToLine() {
+        guard let b = active else { return }
+        let a = NSAlert()
+        a.messageText = "Go to Line"
+        a.informativeText = "Line 1–\(b.lines.lineCount), optionally line:column"
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 200, height: 24))
+        field.placeholderString = "\(b.caretLine)"
+        a.accessoryView = field
+        a.addButton(withTitle: "Go")
+        a.addButton(withTitle: "Cancel")
+        a.window.initialFirstResponder = field
+        guard a.runModal() == .alertFirstButtonReturn else { return }
+        let parts = field.stringValue.split(separator: ":").compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
+        guard let line = parts.first else { return }
+        let start = b.lines.start(ofLine: line)
+        let lineEnd = line < b.lines.lineCount ? b.lines.start(ofLine: line + 1) - 1 : b.storage.length
+        let col = min(max((parts.dropFirst().first ?? 1) - 1, 0), lineEnd - start)
+        if b.viewMode == .tree || b.viewMode == .preview { b.viewMode = .text }
+        b.reveal = NSRange(location: start + col, length: 0)
     }
 
     func closeOthers(_ b: Buffer, in g: EditorGroup) {

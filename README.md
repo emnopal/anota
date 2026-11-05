@@ -5,16 +5,17 @@
 A simple, fast code editor for macOS.
 Written in Swift (SwiftUI + AppKit).
 
-> Status: **v0.1** — first release. Core features work and are unit-tested. See [`.changelog`](.changelog).
+> Status: **v0.2.0**. Core features work and are unit-tested. See [`.changelog`](.changelog).
 
 ## Features
 
-- **Editor:** syntax highlighting (tree-sitter for 13 languages, regex for the rest), line numbers,
+- **Editor:** syntax highlighting (tree-sitter for 14 languages, regex for the rest; incremental, so long files stay responsive), line numbers,
   current-line highlight, auto-indent, word wrap (toolbar, View menu, right-click or ⌥Z), and per-file undo
 - **Encodings and line endings:** UTF-8 / UTF-8 BOM / UTF-16 / Latin-1 detection, LF / CRLF / CR,
   convertible from the status bar
 - **Tabs:** horizontal, or vertical in a pinned "Tabs" sidebar section (⌥⌘T). Drag to reorder or to move between
-  panes. Close Others / Close Tabs to the Left / to the Right / Close All
+  panes. Close Others / Close Tabs to the Left / to the Right / Close All. New file: the tab bar's + button or
+  double-click its empty area
 - **Split view (⌘\\):** panes share the width equally, with draggable dividers. The same file in two panes is edited
   live in both
 - **Directory tree:** open a folder to see a lazy-loading file tree. `.git`, `node_modules` and `.build` are hidden
@@ -36,8 +37,8 @@ Written in Swift (SwiftUI + AppKit).
 
 | Engine | Languages |
 |---|---|
-| tree-sitter | JSON/JSONC, YAML, TOML, INI/.env/.properties, Python, JavaScript/JSX, TypeScript, TSX, Go, C, C++, Rust, Swift |
-| regex | Markdown, HTML/XML, CSS, shell, Java/Kotlin, Ruby, SQL |
+| tree-sitter | JSON/JSONC, YAML, TOML, INI/.properties, Python, JavaScript/JSX, TypeScript, TSX, Go, C, C++, Rust, Swift, Bash/Zsh |
+| regex | Markdown, HTML/XML, CSS, Java/Kotlin, Ruby, SQL, .env, log files (levels, timestamps, IPs, stack frames), Batch (.bat/.cmd), PowerShell (.ps1) |
 
 ### Formatters
 
@@ -100,6 +101,27 @@ open -a build/Anota.app path/to/folder path/to/file.json
 | Word wrap | ⌥Z |
 | Cycle view mode (Text / Tree / Preview / Split) | ⇧⌘V |
 
+VS Code shortcuts (macOS bindings):
+
+| Action | Shortcut |
+|---|---|
+| Toggle line comment | ⌘/ |
+| Move line up / down | ⌥↑ / ⌥↓ |
+| Copy line up / down | ⇧⌥↑ / ⇧⌥↓ |
+| Delete line | ⇧⌘K |
+| Insert line below / above | ⌘↩ / ⇧⌘↩ |
+| Indent / outdent line | ⌘] / ⌘[ |
+| Expand line selection | ⌘L |
+| Select next occurrence (single selection) | ⌘D |
+| Go to line[:column] | ⌃G |
+| Next / previous tab | ⌃⇥ / ⌃⇧⇥, ⌥⌘→ / ⌥⌘← |
+| Focus editor group 1–3 (one past the last splits) | ⌘1 / ⌘2 / ⌘3 |
+| Reopen closed tab | ⇧⌘T |
+| Toggle sidebar / show Explorer | ⌘B / ⇧⌘E |
+| Find in files, format, replace, word wrap, split | ⇧⌘F, ⌥⇧F, ⌥⌘F, ⌥Z, ⌘\\ (as above) |
+
+Not yet: Quick Open (⌘P), Command Palette (⇧⌘P), multi-cursor, and two-key chords (⌘K …).
+
 ## Project layout
 
 ```
@@ -135,12 +157,12 @@ Don't edit `Vendor/` or `Sources/AnotaCore/Queries/` by hand. Change `scripts/ve
 
 ## Versioning & releases
 
-- `.version` holds the version (`0.1`). It sets the app's version; the build number is the commit count.
+- `.version` holds the version (`0.2.0`). It sets the app's version; the build number is the commit count.
 - `.changelog` has a `## v<version>` section per release; that section becomes the release notes.
 - CI (`.github/workflows/ci.yml`) runs `swift test` and `scripts/make-app.sh` on every push and pull request.
   When both pass on `main`, it publishes a GitHub release with the zipped app:
   - `.version` changed (no `v<version>` tag yet) → release **`v<version>`**
-  - `.version` unchanged → pre-release **`v<version>-rc-<UTC YYYYMMDDHHMMSS>`**, e.g. `v0.1-rc-20261030101010`
+  - `.version` unchanged → pre-release **`v<version>-rc-<UTC YYYYMMDDHHMMSS>`**, e.g. `v0.2.0-rc-20261030101010`
 - To release a new version: bump `.version`, add its section to `.changelog`, push to `main`.
 
 ## Data & privacy
@@ -155,7 +177,7 @@ Don't edit `Vendor/` or `Sources/AnotaCore/Queries/` by hand. Change `scripts/ve
 
 - One window per app
 - No LSP, git integration or terminal
-- Large files (10 MB+) may be slow: tree-sitter re-parses the whole file on each edit
+- Very large files (several MB): colours of the edited line update after a short pause in typing
 - YAML / TOML / INI trees are view-only. Only JSON values can be edited in the tree
 - Not notarized yet. On first launch, right-click → Open
 

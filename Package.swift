@@ -40,6 +40,7 @@ let package = Package(
                 "cpp/src/parser.c", "cpp/src/scanner.c",
                 "rust/src/parser.c", "rust/src/scanner.c",
                 "swift/src/parser.c", "swift/src/scanner.c",
+                "bash/src/parser.c", "bash/src/scanner.c",
             ],
             publicHeadersPath: "include",
             cSettings: [.unsafeFlags(["-w", "-O2"])]  // generated C: no warnings; parse tables are slow at -O0

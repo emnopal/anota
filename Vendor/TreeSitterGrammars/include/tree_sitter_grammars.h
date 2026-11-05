@@ -14,4 +14,5 @@ const TSLanguage *tree_sitter_c(void);
 const TSLanguage *tree_sitter_cpp(void);
 const TSLanguage *tree_sitter_rust(void);
 const TSLanguage *tree_sitter_swift(void);
+const TSLanguage *tree_sitter_bash(void);
 #endif
