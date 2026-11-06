@@ -23,11 +23,12 @@ public enum XLSX {
         let dateStyles = try zip.file("xl/styles.xml").map(Styles.dateStyleIndexes) ?? []
         guard let workbook = try zip.file("xl/workbook.xml") else { throw Failure(message: "Not an Excel workbook") }
         let rels = try zip.file("xl/_rels/workbook.xml.rels").map(Relationships.parse) ?? [:]
+        let date1904 = try Workbook.uses1904(workbook)
         return try Workbook.sheets(workbook).compactMap { name, rid in
             guard let target = rels[rid] else { return nil }
             let path = target.hasPrefix("/") ? String(target.dropFirst()) : "xl/" + target
             guard let xml = try zip.file(path) else { return nil }
-            return Sheet(name: name, table: SheetParser.parse(xml, shared: shared, dateStyles: dateStyles, rowLimit: rowLimit, maxCells: maxCells))
+            return Sheet(name: name, table: try SheetParser.parse(xml, shared: shared, dateStyles: dateStyles, date1904: date1904, rowLimit: rowLimit, maxCells: maxCells))
         }
     }
 
@@ -103,11 +104,18 @@ public enum XLSX {
 
     /// Collects attributes / text for simple SAX handlers.
     class Handler: NSObject, XMLParserDelegate {
-        static func run(_ data: Data, _ h: Handler) { let p = XMLParser(data: data); p.delegate = h; p.parse() }
+        var intentionalStop = false
+        var failure: String?
+        static func run(_ data: Data, _ h: Handler) throws {
+            let p = XMLParser(data: data); p.delegate = h
+            let parsed = p.parse()
+            if let failure = h.failure { throw Failure(message: failure) }
+            guard parsed || h.intentionalStop else { throw Failure(message: "Corrupt workbook XML: \(p.parserError?.localizedDescription ?? "parse failed")") }
+        }
     }
 
     enum SharedStrings {
-        static func parse(_ data: Data) -> [String] {
+        static func parse(_ data: Data) throws -> [String] {
             final class H: Handler {
                 var out: [String] = [], cur = "", inT = false, inRPh = false
                 func parser(_ p: XMLParser, didStartElement e: String, namespaceURI: String?, qualifiedName: String?, attributes: [String: String]) {
@@ -118,37 +126,46 @@ public enum XLSX {
                     if e == "t" { inT = false } else if e == "rPh" { inRPh = false } else if e == "si" { out.append(cur) }
                 }
             }
-            let h = H(); Handler.run(data, h); return h.out
+            let h = H(); try Handler.run(data, h); return h.out
         }
     }
 
     enum Workbook {
-        static func sheets(_ data: Data) -> [(String, String)] {
+        static func uses1904(_ data: Data) throws -> Bool {
+            final class H: Handler {
+                var enabled = false
+                func parser(_ p: XMLParser, didStartElement e: String, namespaceURI: String?, qualifiedName: String?, attributes a: [String: String]) {
+                    if e == "workbookPr" { enabled = ["1", "true"].contains(a["date1904"] ?? "") }
+                }
+            }
+            let h = H(); try Handler.run(data, h); return h.enabled
+        }
+        static func sheets(_ data: Data) throws -> [(String, String)] {
             final class H: Handler {
                 var out: [(String, String)] = []
                 func parser(_ p: XMLParser, didStartElement e: String, namespaceURI: String?, qualifiedName: String?, attributes a: [String: String]) {
                     if e == "sheet", let n = a["name"], let id = a["r:id"] ?? a.first(where: { $0.key.hasSuffix(":id") })?.value { out.append((n, id)) }
                 }
             }
-            let h = H(); Handler.run(data, h); return h.out
+            let h = H(); try Handler.run(data, h); return h.out
         }
     }
 
     enum Relationships {
-        static func parse(_ data: Data) -> [String: String] {
+        static func parse(_ data: Data) throws -> [String: String] {
             final class H: Handler {
                 var out: [String: String] = [:]
                 func parser(_ p: XMLParser, didStartElement e: String, namespaceURI: String?, qualifiedName: String?, attributes a: [String: String]) {
                     if e == "Relationship", let id = a["Id"], let t = a["Target"] { out[id] = t }
                 }
             }
-            let h = H(); Handler.run(data, h); return h.out
+            let h = H(); try Handler.run(data, h); return h.out
         }
     }
 
     enum Styles {
         /// Indexes into `cellXfs` whose number format is a date/time.
-        static func dateStyleIndexes(_ data: Data) -> Set<Int> {
+        static func dateStyleIndexes(_ data: Data) throws -> Set<Int> {
             final class H: Handler {
                 var custom: [Int: String] = [:], xfs: [Int] = [], inXfs = false
                 func parser(_ p: XMLParser, didStartElement e: String, namespaceURI: String?, qualifiedName: String?, attributes a: [String: String]) {
@@ -158,7 +175,7 @@ public enum XLSX {
                 }
                 func parser(_ p: XMLParser, didEndElement e: String, namespaceURI: String?, qualifiedName: String?) { if e == "cellXfs" { inXfs = false } }
             }
-            let h = H(); Handler.run(data, h)
+            let h = H(); try Handler.run(data, h)
             func isDate(_ id: Int) -> Bool {
                 if (14...22).contains(id) || (45...47).contains(id) { return true }
                 guard let code = h.custom[id] else { return false }
@@ -170,10 +187,11 @@ public enum XLSX {
     }
 
     enum SheetParser {
-        static func parse(_ data: Data, shared: [String], dateStyles: Set<Int>, rowLimit: Int, maxCells: Int) -> DataTable {
+        static func parse(_ data: Data, shared: [String], dateStyles: Set<Int>, date1904: Bool, rowLimit: Int, maxCells: Int) throws -> DataTable {
             final class H: Handler {
                 let shared: [String], dateStyles: Set<Int>, rowLimit: Int, maxCells: Int
                 var rows: [[Int: String]] = [], row: [Int: String] = [:], width = 0, truncated = false
+                var date1904 = false, dateColumns: Set<Int> = []
                 var col = 0, type = "", style = 0, text = "", inValue = false
                 init(_ s: [String], _ d: Set<Int>, _ l: Int, _ m: Int) { shared = s; dateStyles = d; rowLimit = l; maxCells = m }
                 func parser(_ p: XMLParser, didStartElement e: String, namespaceURI: String?, qualifiedName: String?, attributes a: [String: String]) {
@@ -193,17 +211,19 @@ public enum XLSX {
                     case "c":
                         var v: String? = text
                         switch type {
-                        case "s": v = Int(text).flatMap { $0 < shared.count ? shared[$0] : nil }
+                        case "s":
+                            guard let index = Int(text), shared.indices.contains(index) else { failure = "Corrupt workbook: invalid shared-string index \(text)"; p.abortParsing(); return }
+                            v = shared[index]
                         case "b": v = text == "1" ? "TRUE" : "FALSE"
                         case "e", "str", "inlineStr": break
                         default:
                             if text.isEmpty { v = nil }
-                            else if dateStyles.contains(style), let d = Double(text) { v = XLSX.date(d) }
+                            else if dateStyles.contains(style), let d = Double(text) { v = XLSX.date(d, date1904: date1904); if rows.isEmpty { dateColumns.insert(col) } }
                         }
                         if let v {
                             // Cap when the width grows too, not only per row: one far-right cell would otherwise
                             // widen every row already read.
-                            if (rows.count + 1) * max(width, col + 1) > maxCells { truncated = true; p.abortParsing(); return }
+                            if (rows.count + 1) * max(width, col + 1) > maxCells { truncated = true; intentionalStop = true; p.abortParsing(); return }
                             row[col] = v
                             width = max(width, col + 1)
                         }
@@ -211,7 +231,7 @@ public enum XLSX {
                         // Cap rows and total cells (rows × width), so a sheet with a cell at XFD1048576 can't
                         // make us build a billions-of-cells grid.
                         if rows.count >= rowLimit || rows.count * max(width, 1) >= maxCells {
-                            truncated = true; p.abortParsing(); return
+                            truncated = true; intentionalStop = true; p.abortParsing(); return
                         }
                         rows.append(row)
                     default: break
@@ -219,13 +239,14 @@ public enum XLSX {
                 }
             }
             let h = H(shared, dateStyles, rowLimit, maxCells)
-            Handler.run(data, h)
+            h.date1904 = date1904
+            try Handler.run(data, h)
             // Last line of defence: never build more than maxCells, whatever the parser saw.
             let keep = h.width == 0 ? h.rows.count : min(h.rows.count, maxCells / h.width)
             var grid = h.rows.prefix(keep).map { r in (0..<h.width).map { r[$0] } }
             // First row is the header when it's all text (the usual layout); else generic letters.
             let header: [String]
-            if let first = grid.first, !first.isEmpty, first.allSatisfy({ $0 != nil && Double($0!) == nil }) {
+            if let first = grid.first, !first.isEmpty, h.dateColumns.isEmpty, first.allSatisfy({ $0 != nil && Double($0!) == nil }) {
                 header = first.map { $0! }
                 grid.removeFirst()
             } else {
@@ -257,8 +278,8 @@ public enum XLSX {
     }
 
     /// Excel serial date (1900 system) → ISO text.
-    static func date(_ serial: Double) -> String {
-        let base = Date(timeIntervalSince1970: -2_209_161_600)  // 1899-12-30, absorbs the 1900 leap-year bug
+    static func date(_ serial: Double, date1904: Bool = false) -> String {
+        let base = Date(timeIntervalSince1970: date1904 ? -2_082_844_800 : (serial < 60 ? -2_209_075_200 : -2_209_161_600))  // 1899-12-30, absorbs the 1900 leap-year bug
         let d = base.addingTimeInterval((serial * 86_400).rounded())
         let f = DateFormatter()
         f.locale = Locale(identifier: "en_US_POSIX")

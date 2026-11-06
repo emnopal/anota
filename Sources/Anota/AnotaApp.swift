@@ -11,29 +11,47 @@ struct AnotaApp: App {
         Window("Anota", id: "main") {
             ContentView(ws: ws)
                 .frame(minWidth: 720, minHeight: 420)
+                .onOpenURL { ws.open($0) }
         }
         .commands { AppCommands(ws: ws) }
     }
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    var workspace: Workspace?
+    var presentAlert: (NSAlert) -> NSApplication.ModalResponse = { $0.runModal() }
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)  // needed when launched as a bare SwiftPM binary
         NSApp.activate()
         Task.detached { _ = CodeFormatter.loginShellPath }  // runs the login shell once, off the main thread
     }
 
-    /// Hot exit: never prompt, just persist everything.
+    /// Persist recovery data before quitting; keep the app open if it fails.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        Workspace.shared.saveSession()
+        let ws = workspace ?? .shared
+        while !ws.saveSession() {
+            let alert = NSAlert()
+            alert.messageText = "Couldn't save recovery data"
+            alert.informativeText = "Anota will stay open unless recovery succeeds. Free disk space and retry, or save your unsaved documents elsewhere."
+            alert.addButton(withTitle: "Retry")
+            alert.addButton(withTitle: "Save As…")
+            alert.addButton(withTitle: "Cancel Quit")
+            switch presentAlert(alert) {
+            case .alertFirstButtonReturn: continue
+            case .alertSecondButtonReturn:
+                for buffer in ws.allBuffers where buffer.isDirty {
+                    guard ws.saveAs(buffer) else { return .terminateCancel }
+                }
+                return ws.saveSession() ? .terminateNow : .terminateCancel
+            default: return .terminateCancel
+            }
+        }
         return .terminateNow
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 
-    func application(_ application: NSApplication, open urls: [URL]) {
-        urls.forEach(Workspace.shared.open)
-    }
+
 }
 
 struct AppCommands: Commands {
@@ -62,6 +80,7 @@ struct AppCommands: Commands {
             Button("Find Previous") { ws.find.step(false) }.keyboardShortcut("g", modifiers: [.command, .shift])
             Button("Use Selection for Find") { ws.find.useSelection(ws.active) }.keyboardShortcut("e")
             Button("Find in Files…") {
+                ws.sidebarVisible = true
                 ws.sidebarMode = .search
                 ws.projectSearch.focusToken += 1
             }
@@ -88,6 +107,7 @@ struct AppCommands: Commands {
             Toggle("Word Wrap", isOn: Binding(get: { ws.wrap }, set: { ws.wrap = $0 }))
                 .keyboardShortcut("z", modifiers: .option)
             Button("Split Editor") { ws.split() }.keyboardShortcut("\\")
+            Button("Split Editor Below") { ws.split(.bottom) }.keyboardShortcut("\\", modifiers: [.command, .option])
             Button("Cycle View Mode") {
                 guard let b = ws.active, let i = b.modes.firstIndex(of: b.viewMode) else { return }
                 b.viewMode = b.modes[(i + 1) % b.modes.count]

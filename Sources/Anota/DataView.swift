@@ -22,6 +22,7 @@ struct DataView: View {
         }
         .background(Color(nsColor: .textBackgroundColor))
         .task(id: buffer.revision) { await model.load(buffer) }
+        .onDisappear { model.cancel() }
     }
 
     @ViewBuilder private var main: some View {
@@ -85,7 +86,7 @@ struct DataView: View {
                 Button("Copy All as TSV") { model.copyAll() }
             } label: { Image(systemName: "square.and.arrow.up") }
                 .menuIndicator(.hidden).fixedSize().help("Export the rows shown (filter applies)")
-                .disabled(model.shown == nil)
+                .disabled(!model.canExport)
             Toggle(isOn: $model.showSQL) { Label("SQL", systemImage: "terminal") }
                 .help("Query with SQL (SQLite dialect; ⌘↩ runs)")
         }
@@ -125,7 +126,7 @@ struct DataView: View {
                     Text(tablesHint).foregroundStyle(.secondary).lineLimit(1)
                 }
                 Spacer()
-                if model.running { ProgressView().controlSize(.small) }
+                if model.running { ProgressView().controlSize(.small); Button("Cancel") { model.cancel() } }
                 Menu {
                     if model.history.isEmpty { Text("No queries yet") }
                     ForEach(model.history, id: \.self) { q in
@@ -147,7 +148,10 @@ struct DataView: View {
 
     @ViewBuilder private var grid: some View {
         if let t = model.shown {
-            DataGrid(table: t, version: model.version, filter: model.filter, filterColumn: model.filterColumn)
+            let version = model.version, filter = model.filter, column = model.filterColumn
+            DataGrid(table: t, version: version, filter: filter, filterColumn: column, ordered: {
+                model.acceptDisplayed($0, table: t, version: version, filter: filter, column: column)
+            })
         } else if let e = model.loadError {
             ContentUnavailableView("Can't read \(buffer.language.displayName)", systemImage: "exclamationmark.triangle", description: Text(e))
         } else {
@@ -326,6 +330,20 @@ final class DataModel {
     var loadError: String?
     var total: Int?  // SQLite: real row count of the selected table
     var history: [String] = []
+    private(set) var displayedRows: [Int] = []
+    private var displayed: (table: DataTable, rows: [Int], version: Int, filter: String, column: Int?)?
+    var canExport: Bool { visibleRows != nil }
+
+    func acceptDisplayed(_ rows: [Int]?, table: DataTable, version: Int, filter: String, column: Int?) {
+        guard version == self.version, filter == self.filter, column == filterColumn else { return }
+        displayedRows = rows ?? []
+        displayed = rows.map { (table, $0, version, filter, column) }
+    }
+    private var generation = 0
+    private var selectionGeneration = 0
+    private var queryGeneration = 0
+    @ObservationIgnored private var queryWorker: Task<DataTable, Error>?
+    @ObservationIgnored private var activeDB: SQLiteDB?
     var version = 0  // bumps when the shown table changes (the grid rebuilds columns)
 
     @ObservationIgnored private var fileDB: SQLiteDB?    // SQLite file (read-only)
@@ -349,22 +367,32 @@ final class DataModel {
     func setSQL(_ text: String) { sql?.replaceAll(with: text) }
 
     func load(_ b: Buffer) async {
+        generation += 1
+        let job = generation, sourceRevision = b.revision
+        cancel()
+        fileDB = nil
+        result = nil
         loadError = nil
         historyKey = "sqlHistory." + (b.url?.path ?? b.id.uuidString)
         history = UserDefaults.standard.stringArray(forKey: historyKey) ?? []
         let lang = b.language, url = b.url, text = b.text, name = b.url?.lastPathComponent ?? "untitled"
         let headerWas = sources.indices.contains(selected) ? sources[selected].table?.hasHeaderRow : nil
+        sources = []
         do {
             switch lang {
             case .csv, .tsv:
                 var t = await Task.detached { CSV.parse(text, delimiter: lang == .tsv ? "\t" : nil) }.value
                 if let headerWas, headerWas != t.hasHeaderRow { t = t.togglingHeader() }  // keep the user's choice across edits
+                guard !Task.isCancelled, job == generation, b.revision == sourceRevision else { return }
                 sources = [Source(name: name, table: t)]
             case .jsonl:
-                sources = [Source(name: name, table: await Task.detached { JSONLines.parse(text) }.value)]
+                let t = await Task.detached { JSONLines.parse(text) }.value
+                guard !Task.isCancelled, job == generation, b.revision == sourceRevision else { return }
+                sources = [Source(name: name, table: t)]
             case .excel:
                 guard let url else { return }
                 let sheets = try await Task.detached { try XLSX.read(url) }.value
+                guard !Task.isCancelled, job == generation, b.revision == sourceRevision else { return }
                 sources = sheets.map { Source(name: $0.name, table: $0.table) }
             case .sqlite:
                 guard let url else { return }
@@ -372,6 +400,7 @@ final class DataModel {
                     let db = try SQLiteDB(path: url.path)
                     return (db, try db.schema())
                 }.value
+                guard !Task.isCancelled, job == generation, b.revision == sourceRevision else { return }
                 fileDB = db
                 self.objects = objects
                 sources = objects.map { Source(name: $0.name, table: nil, isView: $0.kind == .view) }
@@ -384,34 +413,44 @@ final class DataModel {
             version += 1
             if lang == .sqlite, !sources.isEmpty { select(selected) }
         } catch {
+            guard !Task.isCancelled, job == generation, b.revision == sourceRevision else { return }
             loadError = "\(error)"
         }
     }
 
     func select(_ i: Int) {
         guard sources.indices.contains(i) else { return }
+        selectionGeneration += 1
+        let selectionJob = selectionGeneration, loadJob = generation
+        cancel()
         selected = i
         result = nil
         filterColumn = nil
         total = nil
         version += 1
         guard let db = fileDB else { return }
-        let name = sources[i].name
+        let name = sources[i].name, needsLoad = sources[i].table == nil
+        guard needsLoad else { return }
+        let queryJob = queryGeneration
+        activeDB = db
+        running = true
         Task {
+            defer { if queryJob == queryGeneration { running = false; activeDB = nil; queryWorker = nil } }
             do {
-                if sources[i].table == nil {
-                    let t = try await Task.detached { try db.query("SELECT * FROM \(SQLiteDB.quote(name)) LIMIT 100000") }.value
-                    if sources.indices.contains(i) { sources[i].table = t; version += 1 }
-                }
-                let n = try await Task.detached { try db.count(name) }.value
-                if selected == i { total = n }
+                let worker = Task.detached { try db.query("SELECT * FROM \(SQLiteDB.quote(name)) LIMIT 100000") }
+                queryWorker = worker
+                let t = try await worker.value
+                if queryJob == queryGeneration, loadJob == generation, selectionJob == selectionGeneration, sources.indices.contains(i) { sources[i].table = t; version += 1 }
+                // Views may perform arbitrary computation; do not count them automatically.
             } catch {
+                guard queryJob == queryGeneration, loadJob == generation, selectionJob == selectionGeneration else { return }
                 loadError = "\(error)"
             }
         }
     }
 
     func toggleHeader() {
+        cancel()
         guard result == nil, sources.indices.contains(selected), let t = sources[selected].table else { return }
         sources[selected].table = t.togglingHeader()
         filterColumn = nil
@@ -419,28 +458,45 @@ final class DataModel {
         version += 1
     }
 
+    func cancel() {
+        queryGeneration += 1
+        queryWorker?.cancel()
+        activeDB?.interrupt()
+        running = false
+    }
+
     func run(_ b: Buffer) {
         guard let sqlText = sql?.text, !sqlText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, !running else { return }
         let query = sqlText.trimmingCharacters(in: .whitespacesAndNewlines)
         error = nil
+        queryGeneration += 1
+        let job = queryGeneration
         running = true
         let revision = b.revision, tables = b.language == .sqlite ? [] : sources.compactMap { s in s.table.map { (s.name, $0) } }
         let reuse = b.language == .sqlite ? fileDB : (importedRevision == revision ? memoryDB : nil)
+        activeDB = reuse
         Task {
-            defer { running = false }
+            defer { if job == queryGeneration { running = false; activeDB = nil; queryWorker = nil } }
             do {
-                let (db, t) = try await Task.detached { () throws -> (SQLiteDB, DataTable) in
+                let db = try await Task.detached { () throws -> SQLiteDB in
                     let db: SQLiteDB
                     if let reuse { db = reuse } else {
                         db = try SQLiteDB(path: nil)
                         for (name, table) in tables { try db.importTable(table, as: SQLiteDB.tableName(for: name)) }
                     }
-                    return (db, try db.query(sqlText))
+                    return db
                 }.value
+                guard job == queryGeneration, revision == b.revision else { return }
+                activeDB = db
+                let worker = Task.detached { try db.query(sqlText) }
+                queryWorker = worker
+                let t = try await worker.value
+                guard job == queryGeneration, revision == b.revision else { return }
                 if b.language != .sqlite { memoryDB = db; importedRevision = revision }
                 result = t
                 remember(query)
             } catch let e as SQLiteDB.Failure {
+                guard job == queryGeneration, revision == b.revision else { return }
                 // Point at the error: SQLite gives a UTF-8 byte offset into the SQL text.
                 if let off = e.offset, let sql {
                     let utf8 = Array(sqlText.utf8)
@@ -453,6 +509,7 @@ final class DataModel {
                     self.error = e.message
                 }
             } catch {
+                guard job == queryGeneration, revision == b.revision else { return }
                 self.error = "\(error)"
             }
         }
@@ -465,30 +522,37 @@ final class DataModel {
         UserDefaults.standard.set(history, forKey: historyKey)
     }
 
-    /// Rows currently shown, honouring the filter (grid sort order isn't applied).
+    /// The same ordered indexes used by the grid.
     private var visibleRows: (DataTable, [Int])? {
-        guard let t = shown else { return nil }
-        return (t, t.matching(filter, column: filterColumn))
+        guard let displayed, displayed.version == version, displayed.filter == filter, displayed.column == filterColumn else { return nil }
+        return (displayed.table, displayed.rows)
+    }
+
+    @discardableResult
+    func export(_ format: ExportFormat, to url: URL) throws -> Int {
+        guard let (table, rows) = visibleRows else { throw CocoaError(.userCancelled) }
+        try (format == .csv ? table.csv(rows: rows) : table.json(rows: rows)).write(to: url, atomically: true, encoding: .utf8)
+        return rows.count
     }
 
     func export(_ format: ExportFormat, name: String) {
-        guard let (t, rows) = visibleRows else { return }
+        guard canExport else { return }
         let panel = NSSavePanel()
         let base = (name as NSString).deletingPathExtension + (result != nil ? "-query" : "")
         panel.nameFieldStringValue = base + (format == .csv ? ".csv" : ".json")
         guard panel.runModal() == .OK, let url = panel.url else { return }
         do {
-            try (format == .csv ? t.csv(rows: rows) : t.json(rows: rows)).write(to: url, atomically: true, encoding: .utf8)
-            Workspace.shared.flash("Exported \(rows.count.formatted()) rows to \(url.lastPathComponent)")
+            let count = try export(format, to: url)
+            Workspace.shared.flash("Exported \(count.formatted()) rows to \(url.lastPathComponent)")
         } catch {
             self.error = "Export failed: \(error.localizedDescription)"
         }
     }
 
-    func copyAll() {
+    func copyAll(to pasteboard: NSPasteboard = .general) {
         guard let (t, rows) = visibleRows else { return }
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(t.tsv(rows: rows), forType: .string)
+        pasteboard.clearContents()
+        pasteboard.setString(t.tsv(rows: rows), forType: .string)
     }
 }
 
@@ -499,6 +563,7 @@ struct DataGrid: NSViewRepresentable {
     let version: Int
     let filter: String
     var filterColumn: Int? = nil
+    var ordered: ([Int]?) -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
@@ -526,12 +591,16 @@ struct DataGrid: NSViewRepresentable {
     }
 
     func updateNSView(_ scroll: NSScrollView, context: Context) {
+        context.coordinator.ordered = ordered
         context.coordinator.update(table: table, version: version, filter: filter, column: filterColumn)
     }
 
     final class Coordinator: NSObject, NSTableViewDataSource, NSTableViewDelegate {
         weak var tableView: NSTableView?
         var table = DataTable(columns: [], rows: [])
+        var ordered: (([Int]?) -> Void)?
+        var work: Task<Void, Never>?
+        var computeGeneration = 0
         var display: [Int] = []  // row indexes after filter + sort
         private var version = -1, filter = "", column: Int?, sort: (column: Int, ascending: Bool)?
         private static let font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
@@ -572,16 +641,31 @@ struct DataGrid: NSViewRepresentable {
         }
 
         private func recompute() {
-            var idx = table.matching(filter, column: column)
-            if let s = sort {
-                let rows = table.rows
-                idx.sort { a, b in
-                    let x = s.column < rows[a].count ? rows[a][s.column] : nil
-                    let y = s.column < rows[b].count ? rows[b][s.column] : nil
-                    return s.ascending ? DataTable.less(x, y) : DataTable.less(y, x)
-                }
+            work?.cancel()
+            computeGeneration += 1
+            let job = computeGeneration, table = table, filter = filter, column = column, sort = sort
+            display = []
+            work = Task {
+                ordered?(nil)
+                try? await Task.sleep(for: .milliseconds(150))
+                guard !Task.isCancelled else { return }
+                let idx = await Task.detached {
+                    var idx = table.matching(filter, column: column)
+                    if let s = sort {
+                        let rows = table.rows
+                        idx.sort { a, b in
+                            let x = s.column < rows[a].count ? rows[a][s.column] : nil
+                            let y = s.column < rows[b].count ? rows[b][s.column] : nil
+                            return s.ascending ? DataTable.less(x, y) : DataTable.less(y, x)
+                        }
+                    }
+                    return idx
+                }.value
+                guard !Task.isCancelled, job == computeGeneration else { return }
+                display = idx
+                ordered?(idx)
+                tableView?.reloadData()
             }
-            display = idx
         }
 
         func numberOfRows(in tableView: NSTableView) -> Int { display.count }
@@ -593,12 +677,13 @@ struct DataGrid: NSViewRepresentable {
         }
 
         func value(row: Int, column: Int) -> String? {
+            guard display.indices.contains(row), table.rows.indices.contains(display[row]) else { return nil }
             let r = table.rows[display[row]]
             return column < r.count ? r[column] : nil
         }
 
         func tableView(_ tv: NSTableView, viewFor col: NSTableColumn?, row: Int) -> NSView? {
-            guard let col else { return nil }
+            guard let col, display.indices.contains(row) else { return nil }
             let id = NSUserInterfaceItemIdentifier("cell")
             let field = (tv.makeView(withIdentifier: id, owner: nil) as? NSTextField) ?? {
                 let f = NSTextField(labelWithString: "")
@@ -624,7 +709,7 @@ struct DataGrid: NSViewRepresentable {
         }
 
         // Copy helpers used by the table's menu and ⌘C.
-        func tsv(rows: IndexSet) -> String { table.tsv(rows: rows.map { display[$0] }) }
+        func tsv(rows: IndexSet) -> String { table.tsv(rows: rows.compactMap { display.indices.contains($0) ? display[$0] : nil }) }
     }
 }
 

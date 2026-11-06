@@ -48,30 +48,68 @@ public struct LineMatch: Sendable, Identifiable, Equatable {
     public let lineText: String
     public let rangeInLine: NSRange
     public let range: NSRange  // in the whole file
+    public var captures: [NSRange] = []
+
+    public func replacement(in text: String, options: SearchOptions, template: String) throws -> String {
+        let re = try options.compile()
+        var ranges = captures.isEmpty ? [range] : captures
+        let match = ranges.withUnsafeMutableBufferPointer {
+            NSTextCheckingResult.regularExpressionCheckingResult(ranges: $0.baseAddress!, count: $0.count, regularExpression: re)
+        }
+        return options.replacement(for: match, in: text, with: template, using: re)
+    }
 }
 
 public struct FileMatches: Sendable, Identifiable, Equatable {
     public var id: URL { url }
     public let url: URL
     public let matches: [LineMatch]
+    public var text: String = ""
+
+    public func replacing(options: SearchOptions, template: String) throws -> String {
+        let out = NSMutableString(string: text)
+        for match in matches.reversed() {
+            out.replaceCharacters(in: match.range, with: try match.replacement(in: text, options: options, template: template))
+        }
+        return out as String
+    }
+}
+
+public struct SearchReport: Sendable {
+    public let files: [FileMatches]
+    public let truncated: Bool
 }
 
 public enum FileSearch {
     public static let defaultExcludes = [".git", "node_modules", ".build", "build", "dist", ".DS_Store", "*.min.js"]
 
-    public static func matches(in text: String, _ re: NSRegularExpression) -> [LineMatch] {
+    public static func matches(in text: String, _ re: NSRegularExpression, limit: Int = 10_000) -> [LineMatch] {
+        scan(text, re, limit: limit).matches
+    }
+
+    private static func scan(_ text: String, _ re: NSRegularExpression, limit: Int) -> (matches: [LineMatch], truncated: Bool) {
         let ns = text as NSString
+        var truncated = false
         var line = 1, scanned = 0
-        return re.matches(in: text, range: NSRange(location: 0, length: ns.length)).compactMap { m in
-            guard m.range.length > 0 else { return nil }
+        var cachedLine = NSRange(location: 0, length: 0)
+        let deadline = Date().addingTimeInterval(2)
+        var out: [LineMatch] = []
+        re.enumerateMatches(in: text, options: .reportProgress, range: NSRange(location: 0, length: ns.length)) { m, _, stop in
+            guard out.count < max(0, limit), !Task.isCancelled, Date() < deadline else { truncated = true; stop.pointee = true; return }
+            guard let m, m.range.length > 0 else { return }
             line += lineCount(ns, from: scanned, to: m.range.location)
             scanned = m.range.location
-            let lr = ns.lineRange(for: NSRange(location: m.range.location, length: 0))
+            if !NSLocationInRange(m.range.location, cachedLine) {
+                cachedLine = ns.lineRange(for: NSRange(location: m.range.location, length: 0))
+            }
+            let start = max(cachedLine.location, m.range.location - 200)
+            let lr = NSRange(location: start, length: min(NSMaxRange(cachedLine), m.range.location + 500) - start)
             let lineText = ns.substring(with: lr).trimmingCharacters(in: .newlines)
             let inLine = NSRange(location: m.range.location - lr.location,
                                  length: min(m.range.length, (lineText as NSString).length - (m.range.location - lr.location)))
-            return LineMatch(line: line, lineText: lineText, rangeInLine: inLine, range: m.range)
+            out.append(LineMatch(line: line, lineText: lineText, rangeInLine: inLine, range: m.range, captures: (0..<m.numberOfRanges).map { m.range(at: $0) }))
         }
+        return (out, truncated)
     }
 
     private static func lineCount(_ ns: NSString, from: Int, to: Int) -> Int {
@@ -96,44 +134,37 @@ public enum FileSearch {
     /// Search every text file under `root`. Runs off the main actor; cancellable.
     public static func search(root: URL, options: SearchOptions, include: [String], exclude: [String],
                               limit: Int = 5000) async throws -> [FileMatches] {
+        try await report(root: root, options: options, include: include, exclude: exclude, limit: limit).files
+    }
+
+    public static func report(root: URL, options: SearchOptions, include: [String], exclude: [String], limit: Int = 5000) async throws -> SearchReport {
         let re = try options.compile()
         let excludes = exclude + defaultExcludes
-        let files = await Task.detached { () -> [URL] in
-            var out: [URL] = []
+        let worker = Task.detached { () throws -> SearchReport in
+            var truncated = false
+            var results: [FileMatches] = [], remaining = max(0, limit)
             let fm = FileManager.default
-            guard let e = fm.enumerator(at: root, includingPropertiesForKeys: [.isDirectoryKey, .fileSizeKey]) else { return [] }
-            let rootPath = root.standardizedFileURL.path
-            while let url = e.nextObject() as? URL {
-                let rel = String(url.standardizedFileURL.path.dropFirst(rootPath.count + 1))
-                let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .fileSizeKey])
-                if matchesGlob(rel, excludes) {
-                    if values?.isDirectory == true { e.skipDescendants() }
-                    continue
+            let root = root.resolvingSymlinksInPath().standardizedFileURL
+            guard let e = fm.enumerator(at: root, includingPropertiesForKeys: [.isDirectoryKey, .fileSizeKey, .isSymbolicLinkKey]) else { return SearchReport(files: [], truncated: false) }
+            let deadline = Date().addingTimeInterval(5)
+            while remaining > 0, let url = e.nextObject() as? URL {
+                try Task.checkCancellation()
+                if Date() > deadline { truncated = true; break }
+                let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .fileSizeKey, .isSymbolicLinkKey])
+                let rel = String(url.path.dropFirst(root.path.count + 1))
+                if values?.isSymbolicLink == true || matchesGlob(rel, excludes) {
+                    e.skipDescendants(); continue
                 }
-                guard values?.isDirectory != true, (values?.fileSize ?? 0) < 5_000_000 else { continue }
-                if include.isEmpty || matchesGlob(rel, include) { out.append(url) }
+                guard url.resolvingSymlinksInPath().path.hasPrefix(root.path + "/"), values?.isDirectory != true,
+                      (values?.fileSize ?? 0) < 5_000_000, include.isEmpty || matchesGlob(rel, include),
+                      let file = try? TextFile.read(url) else { continue }
+                let scanned = scan(file.text, re, limit: remaining)
+                truncated = truncated || scanned.truncated
+                let found = scanned.matches
+                if !found.isEmpty { results.append(FileMatches(url: url, matches: found, text: file.text)); remaining -= found.count }
             }
-            return out
-        }.value
-
-        return try await withThrowingTaskGroup(of: FileMatches?.self) { group in
-            for url in files {
-                group.addTask {
-                    try Task.checkCancellation()
-                    guard let file = try? TextFile.read(url) else { return nil }  // binary/unreadable
-                    let m = matches(in: file.text, re)
-                    return m.isEmpty ? nil : FileMatches(url: url, matches: m)
-                }
-            }
-            var results: [FileMatches] = []
-            var total = 0
-            for try await r in group {
-                guard let r else { continue }
-                results.append(r)
-                total += r.matches.count
-                if total >= limit { group.cancelAll(); break }
-            }
-            return results.sorted { $0.url.path.localizedStandardCompare($1.url.path) == .orderedAscending }
+            return SearchReport(files: results.sorted { $0.url.path.localizedStandardCompare($1.url.path) == .orderedAscending }, truncated: truncated || remaining == 0)
         }
+        return try await withTaskCancellationHandler { try await worker.value } onCancel: { worker.cancel() }
     }
 }

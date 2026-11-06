@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 public enum LineEnding: String, Codable, Sendable, CaseIterable {
     case lf = "\n", crlf = "\r\n", cr = "\r"
@@ -10,9 +11,17 @@ public enum LineEnding: String, Codable, Sendable, CaseIterable {
 /// A decoded text file. `text` always uses "\n"; the original line ending is kept
 /// separately and restored on encode.
 public struct TextFile: Sendable, Equatable {
-    public enum Failure: Error, Equatable {
+    public enum Failure: Error, Equatable, LocalizedError {
+        case changedOnDisk
         case binary
         case unrepresentable  // text has characters the chosen encoding can't hold
+        public var errorDescription: String? {
+            switch self {
+            case .changedOnDisk: "The file changed on disk during saving. Review the external version and try again."
+            case .binary: "This file contains binary data."
+            case .unrepresentable: "The text cannot be saved in the selected encoding."
+            }
+        }
     }
 
     public var text: String
@@ -61,10 +70,37 @@ public struct TextFile: Sendable, Equatable {
     public func write(to url: URL) throws {
         try encoded().write(to: url, options: .atomic)
     }
+
+    /// Coordinate replacement and recheck the version after gaining access to the file.
+    public func write(to url: URL, matching expected: FileRevision) throws {
+        let data = try encoded()
+        var coordinationError: NSError?
+        var result: Result<Void, Error>?
+        NSFileCoordinator().coordinate(writingItemAt: url, options: .forReplacing, error: &coordinationError) { target in
+            result = Result {
+                guard try FileRevision.read(target) == expected else { throw Failure.changedOnDisk }
+                try data.write(to: target, options: .atomic)
+            }
+        }
+        if let coordinationError { throw coordinationError }
+        guard let result else { throw CocoaError(.fileWriteUnknown) }
+        try result.get()
+    }
 }
 
 public func modificationDate(_ url: URL) -> Date? {
     (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date
 }
 
-/// 1-based line number of the UTF-16 offset `location`.
+
+public enum FileRevision: Equatable, Sendable {
+    case missing
+    case contents(Data)
+
+    public init(contents: Data) { self = .contents(Data(SHA256.hash(data: contents))) }
+
+    public static func read(_ url: URL) throws -> Self {
+        do { return Self(contents: try Data(contentsOf: url)) }
+        catch let error as CocoaError where error.code == .fileReadNoSuchFile { return .missing }
+    }
+}

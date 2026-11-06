@@ -20,19 +20,22 @@ public struct Session: Codable, Sendable, Equatable {
     }
 
     public struct Group: Codable, Sendable, Equatable {
+        public var id: UUID?
         public var tabs: [UUID]
         public var active: UUID?
-        public init(tabs: [UUID], active: UUID?) { self.tabs = tabs; self.active = active }
+        public init(tabs: [UUID], active: UUID?, id: UUID? = nil) { self.tabs = tabs; self.active = active; self.id = id }
     }
 
     public var tabs: [Tab]
     public var groups: [Group]
+    public var layout: PaneLayout?
     public var focused: Int
     public var root: String?
     public var verticalTabs: Bool
     public var wrap: Bool
 
-    public init(tabs: [Tab], groups: [Group], focused: Int, root: String?, verticalTabs: Bool, wrap: Bool) {
+    public init(tabs: [Tab], groups: [Group], focused: Int, root: String?, verticalTabs: Bool, wrap: Bool, layout: PaneLayout? = nil) {
+        self.layout = layout
         self.tabs = tabs; self.groups = groups; self.focused = focused
         self.root = root; self.verticalTabs = verticalTabs; self.wrap = wrap
     }

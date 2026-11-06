@@ -3,6 +3,33 @@
 Newest first. Each release's notes are the section whose heading matches `.version`.
 A push to `main` that doesn't change `.version` is published as a pre-release `v<version>-rc-<UTC datetime>`.
 
+## v0.4
+
+Four-direction workspaces, drag-and-drop improvements, and audit fixes.
+
+- Split panes left, right, top, or bottom from the toolbar or tab menu; nest horizontal and vertical splits,
+  resize either axis, and restore split orientation and sizes across sessions. ⌘\ splits right; ⌥⌘\ splits below.
+- Drag horizontal or vertical tabs onto editor edges to split, or into another pane's center/tab strip to move.
+  Larger edge zones and destination previews make targeting easier; cross-pane moves commit on release to keep
+  the source gesture alive. Closing a pane cleans up drag state without erasing surviving tab geometry.
+- Drag directory-tree files onto an editor or tab strip to open there, or onto an editor edge to open in a split.
+- Finder Open With uses the existing window and updates the active tab/editor; reordering preserves the active editor.
+- Recovery checkpoints continue during typing; failed recovery writes are reported, and quitting offers Retry,
+  Save As, or Cancel Quit if recovery cannot be saved. Coordinated saves detect changed disk contents before replacement.
+- Search runs cancellable background work with time/result limits, avoids symlink escapes, reports truncation,
+  and uses the same regex captures for replacement previews and applied changes.
+- Data loads, filtering, sorting, SQL, and tree parsing run off the main thread; stale loads cannot replace newer data.
+  SQL can be interrupted and has a deadline; copy/export follow displayed sort/filter order.
+- CSV preserves empty records; imported SQL column names remain unique; Excel supports 1904 dates and reports
+  malformed XML or invalid shared-string indexes instead of silently returning incomplete results.
+- Markdown preview escapes raw HTML, blocks document JavaScript and remote images, restricts link schemes,
+  and keeps scroll position across updates.
+- Added core, hosted-view, recovery, data, and drag regression tests.
+
+Verification: release test suite passes (81 core tests; 30 app tests reported, including two optional probes skipped).
+Native UI confirmed mixed nested splits and tab selection after closing a pane. Pointer smoothness and native
+file-drop delivery still need manual verification: the computer-control tool returned `noWindowsAvailable`.
+
 ## v0.3.1
 
 Security hardening for the data viewer.

@@ -28,6 +28,7 @@ final class Buffer: NSObject, Identifiable {
     var reveal: NSRange?      // set to select + scroll to a range in the editor
 
     @ObservationIgnored var selection = NSRange(location: 0, length: 0)
+    @ObservationIgnored var diskRevision: FileRevision?
     @ObservationIgnored var diskDate: Date?
     @ObservationIgnored let storage = NSTextStorage()
     @ObservationIgnored let undoManager = UndoManager()
@@ -112,14 +113,17 @@ final class Buffer: NSObject, Identifiable {
             // SQLite / Excel: no text; the grid reads the file itself (revision bumps when it changes on disk).
             let b = Buffer(id: id, url: url)
             b.diskDate = modificationDate(url)
+            b.diskRevision = try? FileRevision.read(url)
             return b
         }
-        let file = try TextFile.read(url)
+        let data = try Data(contentsOf: url)
+        let file = try TextFile.decode(data)
         let b = Buffer(id: id, url: url, text: file.text)
         if b.language != lang { b.language = lang }
         b.encoding = file.encoding
         b.lineEnding = file.lineEnding
         b.diskDate = modificationDate(url)
+        b.diskRevision = FileRevision(contents: data)
         return b
     }
 
@@ -130,13 +134,14 @@ final class Buffer: NSObject, Identifiable {
         undoManager.removeAllActions()
     }
 
-    func write(to url: URL) throws {
+    func write(to url: URL, matching expected: FileRevision) throws {
         precondition(!language.isBinaryData, "binary data files are never written as text")
-        try TextFile(text: text, encoding: encoding, lineEnding: lineEnding).write(to: url)
+        try TextFile(text: text, encoding: encoding, lineEnding: lineEnding).write(to: url, matching: expected)
         self.url = url
         isDirty = false
         conflict = false
         diskDate = modificationDate(url)
+        diskRevision = try FileRevision(contents: TextFile(text: text, encoding: encoding, lineEnding: lineEnding).encoded())
     }
 
     private static func hasSQLiteHeader(_ url: URL) -> Bool {
@@ -148,13 +153,15 @@ final class Buffer: NSObject, Identifiable {
     func reload() throws {
         guard let url else { return }
         if language.isBinaryData { diskDate = modificationDate(url); revision += 1; return }
-        let file = try TextFile.read(url)
+        let data = try Data(contentsOf: url)
+        let file = try TextFile.decode(data)
         setText(file.text)
         encoding = file.encoding
         lineEnding = file.lineEnding
         isDirty = false
         conflict = false
         diskDate = modificationDate(url)
+        diskRevision = FileRevision(contents: data)
     }
 
     func markEdited() {
@@ -270,7 +277,8 @@ extension Buffer: @preconcurrency NSTextStorageDelegate {
 
 @Observable
 final class EditorGroup: Identifiable {
-    let id = UUID()
+    let id: UUID
+    init(id: UUID = UUID()) { self.id = id }
     var tabs: [Buffer] = []
     var active: Buffer?
 
@@ -368,7 +376,22 @@ final class Workspace {
     @ObservationIgnored private var closedURLs: [URL] = []  // ⇧⌘T, most recent last
     var treeSelection: URL?
     var groups: [EditorGroup] = [EditorGroup()]
+    var layout: PaneLayout?
+    var paneLayout: PaneLayout {
+        let ids = groups.map(\.id)
+        if let layout = layout?.retaining(Set(ids)), layout.leaves.count == ids.count, Set(layout.leaves) == Set(ids) { return layout }
+        return .row(ids)
+    }
+    struct SplitDrop: Equatable { let groupID: UUID; let direction: SplitDirection }
+    var splitDrop: SplitDrop?
+    struct TabDrop: Equatable { let groupID: UUID; let beforeID: UUID?; let after: Bool }
+    var tabDrop: TabDrop?
+    @ObservationIgnored var paneFrames: [UUID: CGRect] = [:]
     var focusedID: UUID?
+    @ObservationIgnored var draggingTabID: UUID?
+    @ObservationIgnored var draggingGroupID: UUID?
+    @ObservationIgnored var tabFrames: [UUID: [UUID: CGRect]] = [:]
+    @ObservationIgnored var tabStripFrames: [UUID: CGRect] = [:]
     var verticalTabs = false { didSet { scheduleSave() } }
     var wrap = false { didSet { scheduleSave() } }
     var sidebarMode: SidebarMode = .files
@@ -383,7 +406,10 @@ final class Workspace {
 
     enum SidebarMode: String { case files, search }
 
-    @ObservationIgnored private let store = SessionStore.standard
+    @ObservationIgnored var presentAlert: (NSAlert) -> NSApplication.ModalResponse = { $0.runModal() }
+    @ObservationIgnored var savePanelURL: (NSSavePanel) -> URL? = { $0.runModal() == .OK ? $0.url : nil }
+    @ObservationIgnored private let checkpointSleep: (Duration) async throws -> Void
+    @ObservationIgnored private let store: SessionStore
     @ObservationIgnored private var saveTask: Task<Void, Never>?
     @ObservationIgnored private var editedSinceSave = Set<UUID>()
 
@@ -395,7 +421,13 @@ final class Workspace {
         return groups.flatMap(\.tabs).filter { seen.insert($0.id).inserted }
     }
 
-    private init() { restore() }
+    init(store: SessionStore = .standard,
+         checkpointSleep: @escaping (Duration) async throws -> Void = { try await Task.sleep(for: $0) }) {
+        self.store = store
+        self.checkpointSleep = checkpointSleep
+        restore()
+        layout = paneLayout
+    }
 
     // MARK: Files
 
@@ -423,6 +455,7 @@ final class Workspace {
                 let g = focusedGroup
                 if g.tabs.count == 1, let only = g.tabs.first, only.url == nil, !only.isDirty, only.storage.length == 0 {
                     g.remove(only)
+                    tabFrames[g.id]?[only.id] = nil
                 }
                 g.show(b)
             } catch {
@@ -443,7 +476,20 @@ final class Workspace {
     @discardableResult
     func save(_ b: Buffer) -> Bool {
         guard let url = b.url else { return saveAs(b) }
-        return write(b, to: url)
+        let current = try? FileRevision.read(url)
+        if b.conflict || current != b.diskRevision {
+            b.conflict = true
+            let alert = NSAlert()
+            alert.messageText = "\(b.name) changed on disk"
+            alert.informativeText = "Overwrite the external version with your edits?"
+            alert.addButton(withTitle: "Cancel")
+            alert.addButton(withTitle: "Overwrite")
+            alert.addButton(withTitle: "Reload")
+            let choice = presentAlert(alert)
+            if choice == .alertThirdButtonReturn { try? b.reload(); return false }
+            guard choice == .alertSecondButtonReturn else { return false }
+        }
+        return write(b, to: url, expected: current)
     }
 
     @discardableResult
@@ -451,7 +497,7 @@ final class Workspace {
         let p = NSSavePanel()
         p.nameFieldStringValue = b.name
         if let dir = b.url?.deletingLastPathComponent() ?? root { p.directoryURL = dir }
-        guard p.runModal() == .OK, let url = p.url else { return false }
+        guard let url = savePanelURL(p) else { return false }
         return write(b, to: url)
     }
 
@@ -537,11 +583,12 @@ final class Workspace {
 
     func saveAll() { allBuffers.filter(\.isDirty).forEach { save($0) } }
 
-    private func write(_ b: Buffer, to url: URL) -> Bool {
+    private func write(_ b: Buffer, to url: URL, expected: FileRevision? = nil) -> Bool {
         // SQLite / Excel tabs hold no text: saving would overwrite the file with nothing.
         if b.language.isBinaryData { flash("“\(b.name)” is opened read-only"); return true }
         do {
-            try b.write(to: url)
+            let expected = try expected ?? FileRevision.read(url)
+            try b.write(to: url, matching: expected)
             scheduleSave()
             return true
         } catch TextFile.Failure.unrepresentable {
@@ -552,7 +599,7 @@ final class Workspace {
             a.addButton(withTitle: "Cancel")
             guard a.runModal() == .alertFirstButtonReturn else { return false }
             b.encoding = .utf8
-            return write(b, to: url)
+            return write(b, to: url, expected: expected)
         } catch {
             alert("Can't save “\(b.name)”", error)
             return false
@@ -577,7 +624,9 @@ final class Workspace {
             }
         }
         if let url = b.url, !elsewhere { closedURLs.removeAll { $0 == url }; closedURLs.append(url) }
+        if draggingTabID == b.id { cancelTabDrag() }
         g.remove(b)
+        tabFrames[g.id]?[b.id] = nil
         dropIfEmpty(g)
         scheduleSave()
     }
@@ -648,32 +697,138 @@ final class Workspace {
         if let b = active { close(b, in: focusedGroup) } else { dropIfEmpty(focusedGroup); scheduleSave() }
     }
 
-    func split() {
-        let g = EditorGroup()
-        if let b = active { g.show(b) }
-        let i = groups.firstIndex { $0 === focusedGroup } ?? groups.count - 1
-        groups.insert(g, at: i + 1)
-        focusedID = g.id
+    func split(_ direction: SplitDirection = .right, in pane: EditorGroup? = nil,
+               moving id: UUID? = nil, from source: EditorGroup? = nil) {
+        let target = pane ?? focusedGroup
+        guard groups.contains(where: { $0 === target }) else { return }
+        let buffer: Buffer?
+        if let id {
+            guard let source, groups.contains(where: { $0 === source }), source.tabs.contains(where: { $0.id == id }) else { return }
+            buffer = source.tabs.first { $0.id == id }
+        } else { buffer = target.active }
+        let new = EditorGroup()
+        if let buffer { new.show(buffer) }
+        let tree = paneLayout.inserting(new.id, beside: target.id, direction: direction)
+        let index = groups.firstIndex { $0 === target } ?? 0
+        groups.insert(new, at: index + (direction.before ? 0 : 1))
+        layout = tree
+        if let source, let buffer, id != nil, source !== target || source.tabs.count > 1 {
+            source.remove(buffer)
+            tabFrames[source.id]?[buffer.id] = nil
+            dropIfEmpty(source)
+        }
+        focusedID = new.id
         scheduleSave()
     }
 
-    /// Move a tab (by buffer id) into `target`, before `before` if given.
-    func move(_ id: UUID, to target: EditorGroup, before: Buffer? = nil) {
-        guard let source = groups.first(where: { $0.tabs.contains { $0.id == id } }),
-              let b = source.tabs.first(where: { $0.id == id }), b !== before else { return }
-        source.remove(b)
-        target.tabs.removeAll { $0 === b }
-        let at = before.flatMap { target.tabs.firstIndex(of: $0) } ?? target.tabs.count
-        target.tabs.insert(b, at: at)
-        target.active = b
-        focusedID = target.id
-        if source !== target { dropIfEmpty(source) }
+    func resizeSplit(_ id: UUID, ratio: Double) {
+        layout = paneLayout.resizing(id, ratio: ratio)
         scheduleSave()
+    }
+
+    func cancelTabDrag() {
+        splitDrop = nil
+        tabDrop = nil
+        draggingTabID = nil
+        draggingGroupID = nil
+    }
+
+    func finishTabDrag() {
+        let edge = splitDrop, destination = tabDrop
+        let id = draggingTabID, sourceID = draggingGroupID
+        // Clear before changing the layout: removing the source pane cancels its gesture.
+        cancelTabDrag()
+        guard let id, let source = groups.first(where: { $0.id == sourceID }) else { return }
+        if let edge, let target = groups.first(where: { $0.id == edge.groupID }) {
+            split(edge.direction, in: target, moving: id, from: source)
+        } else if let destination, let target = groups.first(where: { $0.id == destination.groupID }) {
+            move(id, to: target, before: target.tabs.first { $0.id == destination.beforeID },
+                 after: destination.after, from: source)
+        }
+    }
+
+    func dropFiles(_ urls: [URL], in group: EditorGroup, direction: SplitDirection? = nil) {
+        guard groups.contains(where: { $0 === group }) else { return }
+        let files = urls.filter { $0.isFileURL && (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == false }
+        guard !files.isEmpty else { return }
+        focusedID = group.id
+        if let direction {
+            let new = EditorGroup()
+            layout = paneLayout.inserting(new.id, beside: group.id, direction: direction)
+            groups.append(new)
+            focusedID = new.id
+        }
+        for url in files { open(url) }
+        dropIfEmpty(focusedGroup)
+    }
+
+    /// Move a tab (by buffer id) into `target`, before `before` if given.
+    @discardableResult
+    func move(_ id: UUID, to target: EditorGroup, before: Buffer? = nil, after: Bool = false, from sourceGroup: EditorGroup? = nil) -> Bool {
+        guard groups.contains(where: { $0 === target }),
+              let source = sourceGroup ?? groups.first(where: { $0.tabs.contains { $0.id == id } }),
+              groups.contains(where: { $0 === source }),
+              let b = source.tabs.first(where: { $0.id == id }), b !== before else { return false }
+        var reordered = target.tabs.filter { $0 !== b }
+        let at = before.flatMap { reordered.firstIndex(of: $0) }.map { $0 + (after ? 1 : 0) } ?? reordered.count
+        reordered.insert(b, at: at)
+        if source === target {
+            guard reordered.map(\.id) != target.tabs.map(\.id) else { return false }
+            // Reordering must not select a neighbour and rebuild the active editor.
+            target.tabs = reordered
+        } else {
+            source.remove(b)
+            tabFrames[source.id]?[b.id] = nil
+            target.tabs = reordered
+            target.active = b
+            focusedID = target.id
+            dropIfEmpty(source)
+        }
+        scheduleSave()
+        return true
+    }
+
+    func dragTab(to point: CGPoint) {
+        var edge: SplitDrop?
+        var destination: TabDrop?
+        defer {
+            // Avoid publishing an empty preview followed by the same preview on every pointer event.
+            if splitDrop != edge { splitDrop = edge }
+            if tabDrop != destination { tabDrop = destination }
+        }
+        guard let id = draggingTabID,
+              let source = groups.first(where: { $0.id == draggingGroupID }) else { return }
+        if let target = groups.first(where: { paneFrames[$0.id]?.contains(point) == true }),
+           let frame = paneFrames[target.id] {
+            if let direction = SplitDirection.edge(at: point, in: frame) {
+                edge = SplitDrop(groupID: target.id, direction: direction)
+            } else if target !== source {
+                destination = TabDrop(groupID: target.id, beforeID: nil, after: false)
+            }
+            return
+        }
+        guard let target = groups.first(where: { tabStripFrames[$0.id]?.contains(point) == true }) else { return }
+        let hit = tabFrames[target.id]?.first(where: { $0.value.contains(point) })
+        let before = hit.flatMap { hit in target.tabs.first { $0.id == hit.key } }
+        let after = hit.map { point.x > $0.value.midX } ?? false
+        if target === source {
+            if hit == nil, let last = target.tabs.last, let frame = tabFrames[target.id]?[last.id], point.x <= frame.maxX { return }
+            move(id, to: target, before: before, after: after, from: source)
+        } else {
+            // Keep the drag source alive until release, including when it holds the last tab.
+            destination = TabDrop(groupID: target.id, beforeID: before?.id, after: after)
+        }
     }
 
     func dropIfEmpty(_ g: EditorGroup) {
         guard g.tabs.isEmpty, groups.count > 1, let i = groups.firstIndex(where: { $0 === g }) else { return }
+        let tree = paneLayout
         groups.remove(at: i)
+        paneFrames[g.id] = nil
+        tabFrames[g.id] = nil
+        tabStripFrames[g.id] = nil
+        if draggingGroupID == g.id { cancelTabDrag() }
+        layout = tree.retaining(Set(groups.map(\.id)))
         if focusedID == g.id { focusedID = groups[max(0, i - 1)].id }
     }
 
@@ -691,6 +846,7 @@ final class Workspace {
     func keepMine(_ b: Buffer) {
         b.conflict = false
         b.diskDate = b.url.flatMap(modificationDate)
+        b.diskRevision = b.url.flatMap { try? FileRevision.read($0) }
     }
 
     // MARK: Session (hot exit)
@@ -701,32 +857,38 @@ final class Workspace {
 
     func scheduleSave(edited b: Buffer? = nil) {
         if let b { editedSinceSave.insert(b.id) }
-        saveTask?.cancel()
+        guard saveTask == nil else { return }
+        let sleep = checkpointSleep
         saveTask = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(1))
+            try? await sleep(.seconds(1))
             guard !Task.isCancelled else { return }
             self?.saveSession()
         }
     }
 
-    func saveSession() {
+    @discardableResult
+    func saveSession() -> Bool {
         saveTask?.cancel()
+        saveTask = nil
         let buffers = allBuffers
         let session = Session(
             tabs: buffers.map {
                 .init(id: $0.id, path: $0.url?.path, dirty: $0.isDirty, encoding: $0.encoding.rawValue,
                       lineEnding: $0.lineEnding, language: $0.language, selection: $0.selection.location, diskDate: $0.diskDate)
             },
-            groups: groups.map { .init(tabs: $0.tabs.map(\.id), active: $0.active?.id) },
+            groups: groups.map { .init(tabs: $0.tabs.map(\.id), active: $0.active?.id, id: $0.id) },
             focused: groups.firstIndex { $0 === focusedGroup } ?? 0,
-            root: root?.path, verticalTabs: verticalTabs, wrap: wrap)
+            root: root?.path, verticalTabs: verticalTabs, wrap: wrap, layout: paneLayout)
         let changed = Dictionary(uniqueKeysWithValues:
             buffers.filter { $0.isDirty && editedSinceSave.contains($0.id) }.map { ($0.id, $0.text) })
         do {
             try store.save(session, changed: changed)
             editedSinceSave.removeAll()
+            return true
         } catch {
-            NSLog("Anota: session save failed: \(error)")
+            flash("Recovery save failed: \(error.localizedDescription)")
+            scheduleSave()
+            return false
         }
     }
 
@@ -759,19 +921,21 @@ final class Workspace {
             byID[t.id] = b
         }
         let restored = s.groups.compactMap { sg -> EditorGroup? in
-            let g = EditorGroup()
+            let g = EditorGroup(id: sg.id ?? UUID())
             g.tabs = sg.tabs.compactMap { byID[$0] }
             g.active = sg.active.flatMap { byID[$0] } ?? g.tabs.first
             return g.tabs.isEmpty ? nil : g
         }
         if !restored.isEmpty {
             groups = restored
+            layout = s.layout?.retaining(Set(restored.map(\.id)))
             focusedID = restored[min(s.focused, restored.count - 1)].id
         }
         root = s.root.map { URL(filePath: $0, directoryHint: .isDirectory) }
         verticalTabs = s.verticalTabs
         wrap = s.wrap
         saveTask?.cancel()
+        saveTask = nil
     }
 
     func alert(_ title: String, _ error: Error) {

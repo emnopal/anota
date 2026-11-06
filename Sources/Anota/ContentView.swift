@@ -1,5 +1,6 @@
 import AnotaCore
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct ContentView: View {
     @Bindable var ws: Workspace
@@ -12,8 +13,8 @@ struct ContentView: View {
                 .navigationSplitViewColumnWidth(min: 180, ideal: 240, max: 400)
         } detail: {
             VStack(spacing: 0) {
-                SplitPanes(items: ws.groups) { g in GroupView(ws: ws, group: g) }
-                StatusBar(ws: ws)
+                PaneLayoutView(ws: ws, node: ws.paneLayout, selectionID: ws.active?.id)
+                StatusBar(ws: ws).id(ws.active?.id)
             }
         }
         .navigationTitle(ws.active?.name ?? "Anota")
@@ -41,8 +42,12 @@ struct ContentView: View {
             ToolbarItemGroup(placement: .primaryAction) {
                 Toggle(isOn: $ws.wrap) { Label("Word Wrap", systemImage: "text.word.spacing") }
                     .help(ws.wrap ? "Turn off word wrap (⌥Z)" : "Wrap long lines (⌥Z)")
-                Button { ws.split() } label: { Label("Split", systemImage: "square.split.2x1") }
-                    .help("Split editor (⌘\\)")
+                Menu {
+                    ForEach(SplitDirection.allCases) { direction in
+                        Button("Split " + direction.title) { ws.split(direction) }
+                    }
+                } label: { Label("Split", systemImage: "square.split.2x1") }
+                .help("Split editor left, right, top, or bottom")
                 Button {
                     if let b = ws.active { Task { await ws.format(b, selection: true) } }
                 } label: { Label("Format", systemImage: "text.alignleft") }
@@ -172,6 +177,7 @@ struct FileRow: View {
                 .onTapGesture { Workspace.shared.open(node.url) }
                 .tag(node.url)
                 .contextMenu { FileContextMenu(url: node.url) }
+                .onDrag { NSItemProvider(object: node.url as NSURL) }
         }
     }
 }
@@ -192,6 +198,7 @@ struct VerticalTabRow: View {
     let group: EditorGroup
     let buffer: Buffer
     @State private var hover = false
+    @GestureState private var dragActive = false
 
     var body: some View {
         let active = group.active === buffer
@@ -206,6 +213,20 @@ struct VerticalTabRow: View {
         .onTapGesture { group.active = buffer; ws.focusedID = group.id }
         .listRowBackground(active ? RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(0.08)).padding(.horizontal, 8) : nil)
         .contextMenu { TabContextMenu(ws: ws, group: group, buffer: buffer) }
+        .onChange(of: dragActive) { _, active in
+            if !active { ws.cancelTabDrag() }
+        }
+        .highPriorityGesture(DragGesture(minimumDistance: 4, coordinateSpace: .global)
+            .updating($dragActive) { _, active, _ in active = true }
+            .onChanged { value in
+                if ws.draggingTabID != buffer.id || ws.draggingGroupID != group.id {
+                    ws.cancelTabDrag()
+                    ws.draggingTabID = buffer.id
+                    ws.draggingGroupID = group.id
+                }
+                ws.dragTab(to: value.location)
+            }
+            .onEnded { value in ws.dragTab(to: value.location); ws.finishTabDrag() })
     }
 }
 
@@ -214,43 +235,108 @@ struct VerticalTabRow: View {
 struct TabBar: View {
     let ws: Workspace
     let group: EditorGroup
+    var selectionID: UUID? = nil
+    @GestureState private var dragActive = false
     @State private var width: CGFloat = 0
+    @State private var dragging: UUID?
+    @State private var pointerX: CGFloat = 0
+    @State private var pointerY: CGFloat = 0
+    @State private var grabX: CGFloat = 0
+    @State private var dragWidth: CGFloat = 0
 
     var body: some View {
         // Read the active tab here, in body itself: read only inside the ForEach closure it wasn't tracked when
         // a file was opened from outside (Finder / Dock), so the new tab never drew as active.
         let active = group.active
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 2) {
-                ForEach(group.tabs) { b in
-                    TabItem(buffer: b, active: active === b) { ws.close(b, in: group) }
-                        .onTapGesture { group.active = b; ws.focusedID = group.id }
-                        .draggable(b.id.uuidString)
-                        .dropDestination(for: String.self) { items, _ in
-                            guard let id = items.first.flatMap(UUID.init) else { return false }
-                            ws.move(id, to: group, before: b)
-                            return true
-                        }
-                        .contextMenu { TabContextMenu(ws: ws, group: group, buffer: b) }
+        ScrollViewReader { proxy in
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 2) {
+                    ForEach(group.tabs) { b in
+                        DraggableTab(ws: ws, group: group, buffer: b, selected: active === b)
+                            .opacity(dragging == b.id ? 0 : 1)
+                            .id(b.id)
+                    }
+                    NewTabButton { ws.newFile(in: group) }
+                    Color.clear
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .contentShape(Rectangle())
+                        .onTapGesture(count: 2) { ws.newFile(in: group) }
                 }
-                NewTabButton { ws.newFile(in: group) }  // like a browser's "+", right after the last tab
-                // The empty rest of the strip: double-click for a new file.
-                Color.clear
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .contentShape(Rectangle())
-                    .onTapGesture(count: 2) { ws.newFile(in: group) }
+                .animation(.smooth(duration: 0.12), value: group.tabs.map(\.id))
+                .padding(.horizontal, 6)
+                .frame(minWidth: width, maxHeight: .infinity, alignment: .leading)
             }
-            .padding(.horizontal, 6)
-            .frame(minWidth: width, maxHeight: .infinity, alignment: .leading)
+            .onChange(of: active?.id, initial: true) { _, id in
+                if let id {
+                    Task { @MainActor in
+                        await Task.yield()
+                        guard group.active?.id == id else { return }
+                        proxy.scrollTo(id, anchor: .center)
+                    }
+                }
+            }
         }
         .frame(height: 34)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .onGeometryChange(for: CGFloat.self, of: { $0.size.width }) { width = $0 }
-        .dropDestination(for: String.self) { items, _ in
-            guard let id = items.first.flatMap(UUID.init) else { return false }
-            ws.move(id, to: group)
-            return true
+        .overlay(alignment: .topLeading) {
+            if let id = dragging, let buffer = ws.allBuffers.first(where: { $0.id == id }) {
+                TabItem(buffer: buffer, active: true) {}
+                    .frame(width: dragWidth, height: 34)
+                    .background(Color(nsColor: .windowBackgroundColor), in: RoundedRectangle(cornerRadius: 7))
+                    .shadow(color: .black.opacity(0.2), radius: 3, y: 1)
+                    .offset(x: pointerX - grabX - (ws.tabStripFrames[group.id]?.minX ?? 0),
+                            y: pointerY - (ws.tabStripFrames[group.id]?.midY ?? 0))
+                    .allowsHitTesting(false)
+                    .transaction { $0.animation = nil }
+            }
         }
+        .overlay(alignment: .bottom) {
+            if ws.tabDrop?.groupID == group.id {
+                Rectangle().fill(Color.accentColor).frame(height: 2).allowsHitTesting(false)
+            }
+        }
+        .onDrop(of: [UTType.fileURL], delegate: WorkspaceFileDrop(ws: ws, group: group, allowSplit: false))
+        .onGeometryChange(for: CGFloat.self, of: { $0.size.width }) { width = $0 }
+        .onGeometryChange(for: CGRect.self, of: { $0.frame(in: .global) }) { ws.tabStripFrames[group.id] = $0 }
+        .highPriorityGesture(DragGesture(minimumDistance: 4, coordinateSpace: .global)
+            .updating($dragActive) { _, active, _ in active = true }
+            .onChanged { value in
+                if dragging == nil,
+                   let tab = ws.tabFrames[group.id]?.first(where: { $0.value.contains(value.startLocation) }) {
+                    ws.cancelTabDrag()
+                    dragging = tab.key
+                    grabX = value.startLocation.x - tab.value.minX
+                    dragWidth = tab.value.width
+                    ws.draggingTabID = tab.key
+                    ws.draggingGroupID = group.id
+                }
+                pointerX = value.location.x
+                pointerY = value.location.y
+                ws.dragTab(to: value.location)
+            }
+            .onEnded { value in
+                ws.dragTab(to: value.location)
+                dragging = nil
+                ws.finishTabDrag()
+            })
+        .onChange(of: dragActive) { _, active in
+            if !active { dragging = nil; ws.cancelTabDrag() }
+        }
+    }
+}
+
+private struct DraggableTab: View {
+    let ws: Workspace
+    let group: EditorGroup
+    let buffer: Buffer
+    let selected: Bool
+
+    var body: some View {
+        let active = selected
+        TabItem(buffer: buffer, active: active) { ws.close(buffer, in: group) }
+            .onTapGesture { group.active = buffer; ws.focusedID = group.id }
+            .onGeometryChange(for: CGRect.self, of: { $0.frame(in: .global) }) { ws.tabFrames[group.id, default: [:]][buffer.id] = $0 }
+            .contextMenu { TabContextMenu(ws: ws, group: group, buffer: buffer) }
     }
 }
 
@@ -335,7 +421,12 @@ struct TabContextMenu: View {
             .disabled(group.tabs.last === buffer)
         Button("Close All") { ws.closeAll(in: group) }
         Divider()
-        Button("Split Right") { group.active = buffer; ws.focusedID = group.id; ws.split() }
+        ForEach(SplitDirection.allCases) { direction in
+            Button("Split " + direction.title) {
+                group.active = buffer
+                ws.split(direction, in: group)
+            }
+        }
         if let url = buffer.url {
             Divider()
             FileContextMenu(url: url)
@@ -345,66 +436,25 @@ struct TabContextMenu: View {
 
 // MARK: Editor group
 
-/// Side-by-side panes with draggable dividers. Unlike HSplitView, adding or removing a pane
-/// re-divides the width equally, so a new split never opens squeezed to its minimum width.
-struct SplitPanes<Item: Identifiable, Pane: View>: View {
-    let items: [Item]
-    @ViewBuilder let pane: (Item) -> Pane
-    @State private var widths: [Item.ID: CGFloat] = [:]  // fractions; empty = equal
-    @State private var dragStart: (CGFloat, CGFloat)?
-    private let minWidth: CGFloat = 220
-
-    var body: some View {
-        GeometryReader { geo in
-            let avail = max(geo.size.width - CGFloat(items.count - 1), 1)
-            HStack(spacing: 0) {
-                ForEach(Array(items.enumerated()), id: \.element.id) { i, item in
-                    if i > 0 { divider(between: items[i - 1].id, and: item.id, avail: avail) }
-                    pane(item).frame(width: avail * fraction(item.id))
-                }
-            }
-        }
-        .onChange(of: items.map(\.id)) { widths = [:] }
-    }
-
-    private func fraction(_ id: Item.ID) -> CGFloat { widths[id] ?? 1 / CGFloat(max(items.count, 1)) }
-
-    private func divider(between a: Item.ID, and b: Item.ID, avail: CGFloat) -> some View {
-        Rectangle()
-            .fill(Color(nsColor: .separatorColor))
-            .frame(width: 1)
-            .overlay {
-                Color.clear
-                    .frame(width: 9)
-                    .contentShape(Rectangle())
-                    .pointerStyle(.columnResize)
-                    .gesture(DragGesture(minimumDistance: 1)
-                        .onChanged { g in
-                            let start = dragStart ?? (fraction(a), fraction(b))
-                            dragStart = start
-                            let total = start.0 + start.1, lo = min(minWidth / avail, total / 2)
-                            let left = min(max(start.0 + g.translation.width / avail, lo), total - lo)
-                            var w = Dictionary(uniqueKeysWithValues: items.map { ($0.id, fraction($0.id)) })
-                            w[a] = left
-                            w[b] = total - left
-                            widths = w
-                        }
-                        .onEnded { _ in dragStart = nil })
-            }
-    }
-}
-
 struct GroupView: View {
     let ws: Workspace
     let group: EditorGroup
+    let selectionID: UUID?
+
+    init(ws: Workspace, group: EditorGroup) {
+        self.ws = ws
+        self.group = group
+        self.selectionID = group.active?.id
+    }
 
     var body: some View {
-        VStack(spacing: 0) {
+        let active = group.active
+        return VStack(spacing: 0) {
             if !ws.verticalTabs && !group.tabs.isEmpty {
-                TabBar(ws: ws, group: group)
+                TabBar(ws: ws, group: group, selectionID: active?.id)
                 Divider()
             }
-            if let b = group.active {
+            if let b = active {
                 if b.conflict { ConflictBanner(ws: ws, buffer: b) }
                 Group {
                     switch b.viewMode {
@@ -420,6 +470,9 @@ struct GroupView: View {
                     }
                 }
                 .id(b.id)
+                .onGeometryChange(for: CGRect.self, of: { $0.frame(in: .global) }) { ws.paneFrames[group.id] = $0 }
+                .overlay { splitPreview }
+                .onDrop(of: [UTType.fileURL], delegate: WorkspaceFileDrop(ws: ws, group: group))
                 .overlay(alignment: .topTrailing) {
                     if ws.find.visible && ws.focusedGroup === group && [.text, .split].contains(b.viewMode) {
                         FindBar(find: ws.find)
@@ -427,6 +480,9 @@ struct GroupView: View {
                 }
             } else {
                 EmptyEditor(ws: ws, group: group)
+                    .onGeometryChange(for: CGRect.self, of: { $0.frame(in: .global) }) { ws.paneFrames[group.id] = $0 }
+                    .overlay { splitPreview }
+                    .onDrop(of: [UTType.fileURL], delegate: WorkspaceFileDrop(ws: ws, group: group))
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -439,8 +495,32 @@ struct GroupView: View {
 }
 
 extension GroupView {
+    @ViewBuilder fileprivate var splitPreview: some View {
+        if let drop = ws.splitDrop, drop.groupID == group.id {
+            GeometryReader { geometry in
+                let direction = drop.direction
+                let width = geometry.size.width * (direction.horizontal ? 0.5 : 1)
+                let height = geometry.size.height * (direction.horizontal ? 1 : 0.5)
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(Color.accentColor.opacity(0.18))
+                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.accentColor, lineWidth: 2))
+                    .frame(width: width, height: height)
+                    .position(x: direction == .right ? geometry.size.width - width / 2 : width / 2,
+                              y: direction == .bottom ? geometry.size.height - height / 2 : height / 2)
+            }
+            .allowsHitTesting(false)
+        } else if ws.tabDrop?.groupID == group.id {
+            RoundedRectangle(cornerRadius: 6)
+                .fill(Color.accentColor.opacity(0.12))
+                .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.accentColor, lineWidth: 2))
+                .allowsHitTesting(false)
+        }
+    }
+}
+
+extension GroupView {
     fileprivate func editor(_ b: Buffer) -> some View {
-        EditorView(buffer: b, wrap: ws.wrap, reveal: b.reveal) { ws.focusedID = group.id }
+        EditorView(buffer: b, wrap: ws.wrap, reveal: b.reveal, isActive: { group.active === b && ws.focusedGroup === group }) { ws.focusedID = group.id; ws.find.highlight() }
             .frame(minWidth: 200)
     }
 }

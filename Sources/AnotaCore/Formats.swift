@@ -55,8 +55,9 @@ public enum MarkdownHTML {
     public static func page(_ markdown: String) -> String {
         """
         <!doctype html><html><head><meta charset="utf-8">
+        <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src file: data:; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
         <meta name="color-scheme" content="light dark"><style>\(css)</style></head>
-        <body><article>\(HTMLFormatter.format(markdown))</article></body></html>
+        <body><article>\(SafeMarkdown.render(Document(parsing: markdown)))</article></body></html>
         """
     }
 
@@ -77,4 +78,52 @@ public enum MarkdownHTML {
     img { max-width: 100%; } hr { border: 0; border-top: 1px solid var(--border); margin: 2em 0; }
     li > input[type=checkbox] { margin-right: .4em; }
     """
+}
+
+private struct SafeMarkdown: MarkupWalker {
+    var html = ""
+    static func escape(_ s: String) -> String {
+        s.replacingOccurrences(of: "&", with: "&amp;").replacingOccurrences(of: "<", with: "&lt;").replacingOccurrences(of: ">", with: "&gt;").replacingOccurrences(of: "\"", with: "&quot;")
+    }
+    static func render(_ markup: Markup) -> String { var w = Self(); w.visit(markup); return w.html }
+    mutating func defaultVisit(_ markup: Markup) {
+        let tag: String?
+        switch markup {
+        case let h as Heading: tag = "h\(h.level)"
+        case is Paragraph: tag = "p"
+        case is Strong: tag = "strong"
+        case is Emphasis: tag = "em"
+        case is Strikethrough: tag = "del"
+        case is BlockQuote: tag = "blockquote"
+        case is OrderedList: tag = "ol"
+        case is UnorderedList: tag = "ul"
+        case is ListItem: tag = "li"
+        case is Table: tag = "table"
+        case is Table.Head: tag = "thead"
+        case is Table.Body: tag = "tbody"
+        case is Table.Row: tag = "tr"
+        case is Table.Cell: tag = "td"
+        default: tag = nil
+        }
+        if let tag { html += "<\(tag)>" }
+        descendInto(markup)
+        if let tag { html += "</\(tag)>" }
+    }
+    mutating func visitText(_ text: Text) { html += Self.escape(text.string) }
+    mutating func visitCodeBlock(_ code: CodeBlock) { html += "<pre><code>" + Self.escape(code.code) + "</code></pre>" }
+    mutating func visitInlineCode(_ code: InlineCode) { html += "<code>" + Self.escape(code.code) + "</code>" }
+    mutating func visitHTMLBlock(_ block: HTMLBlock) { html += Self.escape(block.rawHTML) }
+    mutating func visitInlineHTML(_ inline: InlineHTML) { html += Self.escape(inline.rawHTML) }
+    mutating func visitSoftBreak(_ br: SoftBreak) { html += "\n" }
+    mutating func visitLineBreak(_ br: LineBreak) { html += "<br>" }
+    mutating func visitThematicBreak(_ br: ThematicBreak) { html += "<hr>" }
+    mutating func visitLink(_ link: Link) {
+        if let destination = link.destination, let scheme = URL(string: destination)?.scheme?.lowercased(), ["https", "http", "mailto"].contains(scheme) {
+            html += "<a href=\"" + Self.escape(destination) + "\">"; descendInto(link); html += "</a>"
+        } else { descendInto(link) }
+    }
+    mutating func visitImage(_ image: Image) {
+        guard let source = image.source, URL(string: source)?.scheme == nil, !source.hasPrefix("//") else { return }
+        html += "<img src=\"" + Self.escape(source) + "\" alt=\"" + Self.escape(image.plainText) + "\">"
+    }
 }

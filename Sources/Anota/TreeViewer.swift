@@ -32,9 +32,9 @@ struct TreeViewer: View {
         }
         .background(Color(nsColor: .textBackgroundColor))
         .task(id: buffer.revision) {
-            let parsed = Result { try buffer.parseTree() }
-                .map { TreeItem.build($0) }
-                .mapError { $0 as? ParseError ?? ParseError(message: "\($0)", line: 1, column: 1) }
+            let text = buffer.text, language = buffer.language, plist = buffer.isPlist, revision = buffer.revision
+            let parsed = await Self.parse(text: text, language: language, plist: plist)
+            guard !Task.isCancelled, buffer.revision == revision else { return }
             if tree == nil, case .success(let t) = parsed {
                 // Open the top two levels on first show.
                 expanded = Set([t.id] + (t.children ?? []).filter { $0.children != nil }.map(\.id))
@@ -48,6 +48,21 @@ struct TreeViewer: View {
         } message: {
             Text(editing?.id ?? "")
         }
+    }
+
+    static func parse(text: String, language: Language, plist: Bool) async -> Result<TreeItem, ParseError> {
+        await Task.detached {
+            Result { () throws -> Node in
+                if plist { return try Plist.parse(text) }
+                switch language {
+                case .ini, .dotenv: return INI.parse(text)
+                case .yaml: return try YAML.parse(text)
+                case .toml: return try TOML.parse(text)
+                default: return try JSON.parse(text)
+                }
+            }.map { TreeItem.build($0) }
+             .mapError { $0 as? ParseError ?? ParseError(message: "\($0)", line: 1, column: 1) }
+        }.value
     }
 
     @ViewBuilder private var content: some View {

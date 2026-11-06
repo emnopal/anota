@@ -1,7 +1,7 @@
-plan/
 dev-progress/
 .build/
 .swiftpm/
 *.app
 .DS_Store
 build/
+audit/

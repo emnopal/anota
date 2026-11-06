@@ -26,6 +26,7 @@ public final class SQLiteDB: @unchecked Sendable {  // used from one task at a t
         public let notNull: Bool
     }
 
+    private let lock = NSRecursiveLock()
     private var db: OpaquePointer?
 
     /// `path` nil = a private in-memory database.
@@ -58,8 +59,19 @@ public final class SQLiteDB: @unchecked Sendable {  // used from one task at a t
         }
     }
 
+    public func interrupt() { sqlite3_interrupt(db) }
+
     /// Run one statement; rows are capped at `limit` (then `truncated`). Values are text; BLOBs summarised.
-    public func query(_ sql: String, _ args: [String] = [], limit: Int = 100_000) throws -> DataTable {
+    public func query(_ sql: String, _ args: [String] = [], limit: Int = 100_000, timeout: TimeInterval = 10) throws -> DataTable {
+        lock.lock(); defer { lock.unlock() }
+        try Task.checkCancellation()
+        let deadline = Date().addingTimeInterval(timeout)
+        let budget = Unmanaged.passRetained(QueryBudget(deadline))
+        sqlite3_progress_handler(db, 1000, { context in
+            guard let context else { return 1 }
+            return Task.isCancelled || Date() >= Unmanaged<QueryBudget>.fromOpaque(context).takeUnretainedValue().deadline ? 1 : 0
+        }, budget.toOpaque())
+        defer { sqlite3_progress_handler(db, 0, nil, nil); budget.release() }
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { throw error(positioned: true) }
         defer { sqlite3_finalize(stmt) }
@@ -122,11 +134,12 @@ public final class SQLiteDB: @unchecked Sendable {  // used from one task at a t
     }
 
     static func uniqueNames(_ names: [String]) -> [String] {
-        var seen: [String: Int] = [:]
-        return names.map { n in
-            let k = n.lowercased()
-            defer { seen[k, default: 0] += 1 }
-            return seen[k].map { "\(n)_\($0 + 1)" } ?? n
+        var used: Set<String> = []
+        return names.map { name in
+            var candidate = name, suffix = 2
+            while used.contains(candidate.lowercased()) { candidate = "\(name)_\(suffix)"; suffix += 1 }
+            used.insert(candidate.lowercased())
+            return candidate
         }
     }
 
@@ -143,3 +156,5 @@ public final class SQLiteDB: @unchecked Sendable {  // used from one task at a t
 }
 
 private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+
+private final class QueryBudget { let deadline: Date; init(_ deadline: Date) { self.deadline = deadline } }

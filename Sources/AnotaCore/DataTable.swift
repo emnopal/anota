@@ -156,14 +156,14 @@ public enum CSV {
         t.withUTF8 { buf in
             var record: [String] = []
             var field: [UInt8] = []
-            var quoted = false, wasQuoted = false
+            var quoted = false, wasQuoted = false, recordQuoted = false
             var i = 0
             let n = buf.count
             func endField() { record.append(String(decoding: field, as: UTF8.self)); field.removeAll(keepingCapacity: true); wasQuoted = false }
             func endRecord() {
                 endField()
-                if !(record.count == 1 && record[0].isEmpty) { records.append(record) }  // skip blank lines
-                record = []
+                if !(record.count == 1 && record[0].isEmpty && !recordQuoted) { records.append(record) }  // skip blank lines
+                record = []; recordQuoted = false
             }
             while i < n {
                 let c = buf[i]
@@ -174,7 +174,7 @@ public enum CSV {
                         field.append(c)
                     }
                 } else if c == 34 && field.isEmpty && !wasQuoted {
-                    quoted = true; wasQuoted = true
+                    quoted = true; wasQuoted = true; recordQuoted = true
                 } else if c == d {
                     endField()
                 } else if c == 10 {

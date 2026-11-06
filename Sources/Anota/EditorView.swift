@@ -39,11 +39,14 @@ struct EditorView: NSViewRepresentable {
     let buffer: Buffer
     let wrap: Bool
     let reveal: NSRange?
+    var isActive: () -> Bool = { true }
     let onFocus: () -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(buffer: buffer) }
 
-    func makeNSView(context: Context) -> NSScrollView {
+    func makeNSView(context: Context) -> NSScrollView { makeEditor(coordinator: context.coordinator) }
+
+    func makeEditor(coordinator: Coordinator) -> NSScrollView {
         let lm = NSLayoutManager()
         lm.allowsNonContiguousLayout = true
         buffer.storage.addLayoutManager(lm)
@@ -53,7 +56,7 @@ struct EditorView: NSViewRepresentable {
 
         let tv = CodeTextView(frame: .zero, textContainer: tc)
         tv.configure()
-        tv.delegate = context.coordinator
+        tv.delegate = coordinator
         tv.onFocus = onFocus
         tv.buffer = buffer
 
@@ -65,23 +68,34 @@ struct EditorView: NSViewRepresentable {
         scroll.verticalRulerView = LineNumberRuler(textView: tv, scrollView: scroll) { [buffer] in buffer.lines }
         scroll.hasVerticalRuler = true
         scroll.rulersVisible = true
-        context.coordinator.applyWrap(wrap, tv, scroll)
+        coordinator.applyWrap(wrap, tv, scroll)
 
         let sel = clamp(reveal ?? buffer.selection)
         tv.setSelectedRange(sel)
         DispatchQueue.main.async {
+            guard tv.buffer === buffer, coordinator.buffer === buffer, isActive(), tv.window != nil else { return }
             tv.scrollRangeToVisible(sel)
             tv.window?.makeFirstResponder(tv)
-            Workspace.shared.find.highlight()
             if reveal != nil { buffer.reveal = nil }
         }
         return scroll
     }
 
-    func updateNSView(_ scroll: NSScrollView, context: Context) {
+    func updateNSView(_ scroll: NSScrollView, context: Context) { updateEditor(scroll, coordinator: context.coordinator) }
+
+    func updateEditor(_ scroll: NSScrollView, coordinator: Coordinator) {
         guard let tv = scroll.documentView as? CodeTextView else { return }
         tv.onFocus = onFocus
-        context.coordinator.applyWrap(wrap, tv, scroll)
+        if coordinator.buffer !== buffer, let lm = tv.layoutManager {
+            lm.textStorage?.removeLayoutManager(lm)
+            buffer.storage.addLayoutManager(lm)
+            coordinator.buffer = buffer
+            tv.buffer = buffer
+            scroll.verticalRulerView = LineNumberRuler(textView: tv, scrollView: scroll) { [buffer] in buffer.lines }
+            buffer.highlightAll()
+            tv.setSelectedRange(clamp(buffer.selection))
+        }
+        coordinator.applyWrap(wrap, tv, scroll)
         if let r = reveal {
             let r = clamp(r)
             tv.setSelectedRange(r)
@@ -104,7 +118,7 @@ struct EditorView: NSViewRepresentable {
     }
 
     final class Coordinator: NSObject, NSTextViewDelegate {
-        let buffer: Buffer
+        var buffer: Buffer
         private var wrapApplied: Bool?
 
         init(buffer: Buffer) { self.buffer = buffer }

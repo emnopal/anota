@@ -5,7 +5,7 @@
 A simple, fast code editor for macOS.
 Written in Swift (SwiftUI + AppKit).
 
-> Status: **v0.3.1**. Core features work and are unit-tested. See [`.changelog`](.changelog).
+> Status: **v0.4**. Core features work and are unit-tested. See [`.changelog`](.changelog).
 
 ## Features
 
@@ -17,11 +17,14 @@ Written in Swift (SwiftUI + AppKit).
 - **Tabs:** horizontal, or vertical in a pinned "Tabs" sidebar section (⌥⌘T). Drag to reorder or to move between
   panes. Close Others / Close Tabs to the Left / to the Right / Close All. New file: the tab bar's + button or
   double-click its empty area
-- **Split view (⌘\\):** panes share the width equally, with draggable dividers. The same file in two panes is edited
-  live in both
-- **Directory tree:** open a folder to see a lazy-loading file tree. `.git`, `node_modules` and `.build` are hidden
-- **Session restore (hot exit):** quitting never asks to save. Unsaved and untitled files, tabs, splits and the
-  open folder all come back on relaunch. A crash loses at most about one second of typing
+- **Split workspace:** split left, right, top, or bottom from the toolbar or tab menu. Drag a tab to an editor edge
+  to split, or into another pane's center/tab strip to move it. Nest splits, resize either axis, and restore their
+  layout and sizes on relaunch. ⌘\\ splits right; ⌥⌘\\ splits below. The same file in two panes is edited live in both
+- **Directory tree:** open a folder to see a lazy-loading file tree. Drag files onto a pane/tab strip to open there,
+  or onto an editor edge to split. `.git`, `node_modules` and `.build` are hidden
+- **Session restore (hot exit):** unsaved and untitled files, tabs, splits and the open folder come back on relaunch.
+  Recovery checkpoints run during editing and on quit. If recovery cannot be saved, quitting offers Retry,
+  Save As, or Cancel Quit
 - **Markdown:** Text / Split / Preview (⇧⌘V), GitHub-style rendering, light and dark
 - **JSON / YAML / TOML / INI / .env / plist:** a tree view in the style of Firefox's JSON viewer, with:
   - filter, expand/collapse all
@@ -105,7 +108,7 @@ open -a build/Anota.app path/to/folder path/to/file.json
 | Find next / previous / use selection | ⌘G / ⇧⌘G / ⌘E |
 | Find in Files | ⇧⌘F |
 | Format Document / Format Selection | ⌥⇧F / ⌥⇧⌘F |
-| Split editor | ⌘\\ |
+| Split editor right / below | ⌘\\ / ⌥⌘\\ |
 | Vertical tabs | ⌥⌘T |
 | Word wrap | ⌥Z |
 | Cycle view mode (Text / Tree / Preview / Split) | ⇧⌘V |
@@ -142,7 +145,8 @@ Sources/
     Queries/      tree-sitter highlight queries (generated)
   Anota/          the app: SwiftUI + AppKit (workspace, editor view, tabs, sidebar, find, viewers, data grid)
 Tests/
-  AnotaCoreTests/       (Fixtures/: sample.xlsx)
+  AnotaCoreTests/       parser, search, layout, save and data regression tests + fixtures
+  AnotaTests/           workspace, hosted-view, recovery and data acceptance tests
 Vendor/
   TreeSitterGrammars/   generated tree-sitter parsers (C), vendored from release tarballs
 scripts/
@@ -150,6 +154,7 @@ scripts/
   make-icon.swift       render assets/AppIcon.icns
   release-tag.sh        next release tag from .version
   release-notes.sh      the .changelog section for .version
+plan/                   feature status, remaining work and release history
 assets/                 app icon
 .github/workflows/      CI: test, build, release
   vendor-grammars.sh    re-fetch tree-sitter grammars + queries (bump versions there)
@@ -167,23 +172,27 @@ Don't edit `Vendor/` or `Sources/AnotaCore/Queries/` by hand. Change `scripts/ve
 
 ## Versioning & releases
 
-- `.version` holds the version (`0.3.1`). It sets the app's version; the build number is the commit count.
+- `.version` holds the version (`0.4`). It sets the app's version; the build number is the commit count.
 - `.changelog` has a `## v<version>` section per release; that section becomes the release notes.
 - CI (`.github/workflows/ci.yml`) runs `swift test` and `scripts/make-app.sh` on every push and pull request.
   When both pass on `main`, it publishes a GitHub release with the zipped app:
   - `.version` changed (no `v<version>` tag yet) → release **`v<version>`**
-  - `.version` unchanged → pre-release **`v<version>-rc-<UTC YYYYMMDDHHMMSS>`**, e.g. `v0.3.1-rc-20261030101010`
+  - `.version` unchanged → pre-release **`v<version>-rc-<UTC YYYYMMDDHHMMSS>`**, e.g. `v0.4-rc-20261030101010`
 - To release a new version: bump `.version`, add its section to `.changelog`, push to `main`.
 
 ## Data & privacy
 
 - **Session data:** stored locally in `~/Library/Application Support/Anota/Session/`. Delete that folder to start
   with a fresh session.
-- **Network:** Anota makes no network requests of its own. A Markdown preview loads remote images only if the
-  document links to them, and clicked links open in your browser.
+- **Network:** Anota makes no network requests of its own. Markdown previews block remote images and document
+  JavaScript; HTTP/HTTPS links open in your browser and mailto links open in your mail app. Relative local images
+  are supported; raw HTML is displayed as text.
 - **Formatters:** these are your own installed tools, run only when you format (or save, with Format on Save on).
 
 ## Known limitations
+
+- Native UI checks confirm nested splits and tab selection after pane closure. Pointer smoothness and native
+  file-drop delivery still need manual verification; automated tests cover layout, drag logic and file URL transfer.
 
 - One window per app
 - No LSP, git integration or terminal

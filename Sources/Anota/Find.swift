@@ -89,8 +89,13 @@ final class FindController {
     /// nil = invalid regex. ponytail: capped at 10K matches.
     nonisolated private static func search(_ text: String, _ o: SearchOptions) -> [NSRange]? {
         guard let re = try? o.compile() else { return nil }
-        return Array(re.matches(in: text, range: NSRange(location: 0, length: (text as NSString).length))
-            .lazy.map(\.range).filter { $0.length > 0 }.prefix(10_000))
+        var ranges: [NSRange] = []
+        let deadline = Date().addingTimeInterval(2)
+        re.enumerateMatches(in: text, options: .reportProgress, range: NSRange(location: 0, length: (text as NSString).length)) { match, _, stop in
+            guard ranges.count < 10_000, !Task.isCancelled, Date() < deadline else { stop.pointee = true; return }
+            if let match, match.range.length > 0 { ranges.append(match.range) }
+        }
+        return ranges
     }
 
     func highlight() {
@@ -245,9 +250,16 @@ final class ProjectSearch {
     var include = ""
     var exclude = ""
     var results: [FileMatches] = []
+    var truncated = false
+    var completedOptions: SearchOptions?
+    var completedInclude = ""
+    var completedExclude = ""
+    var completedRoot: URL?
+    var canReplace: Bool { !running && !results.isEmpty && options == completedOptions && include == completedInclude && exclude == completedExclude }
     var running = false
     var error: String?
     var focusToken = 0
+    @ObservationIgnored var confirmReplacement: (NSAlert) -> NSApplication.ModalResponse = { $0.runModal() }
 
     @ObservationIgnored private var task: Task<Void, Never>?
 
@@ -258,13 +270,20 @@ final class ProjectSearch {
         error = nil
         guard let root, !options.query.isEmpty else { results = []; running = false; return }
         running = true
+        results = []
+        let included = include, excluded = exclude
         let (o, inc, exc) = (options, FileSearch.globs(include), FileSearch.globs(exclude))
         task = Task {
             do {
                 try await Task.sleep(for: .milliseconds(250))  // debounce typing
-                let r = try await FileSearch.search(root: root, options: o, include: inc, exclude: exc)
+                let r = try await FileSearch.report(root: root, options: o, include: inc, exclude: exc)
                 guard !Task.isCancelled else { return }
-                results = r
+                completedOptions = o
+                completedInclude = included
+                completedExclude = excluded
+                completedRoot = root
+                results = r.files
+                truncated = r.truncated
             } catch is CancellationError {
                 return
             } catch {
@@ -279,29 +298,33 @@ final class ProjectSearch {
     /// other files are rewritten on disk.
     func replaceAll(in ws: Workspace) {
         let files = results
-        guard !files.isEmpty else { return }
+        guard canReplace, ws.root == completedRoot else { return }
+        let appliedOptions = options, template = replacement
         let a = NSAlert()
         a.messageText = "Replace \(total) occurrences in \(files.count) files with “\(replacement)”?"
         a.informativeText = "Files that aren't open are changed on disk and can't be undone."
         a.addButton(withTitle: "Replace")
         a.addButton(withTitle: "Cancel")
-        guard a.runModal() == .alertFirstButtonReturn else { return }
+        guard confirmReplacement(a) == .alertFirstButtonReturn, canReplace, ws.root == completedRoot, options == appliedOptions, replacement == template else { return }
         var failed: [String] = []
         for f in files {
             if let b = ws.buffer(for: f.url) {
-                if let (text, n) = try? options.replaceAll(in: b.text, with: replacement), n > 0 { b.replaceAll(with: text) }
+                guard b.text == f.text else { failed.append(f.url.lastPathComponent); continue }
+                if let text = try? f.replacing(options: options, template: replacement) { b.replaceAll(with: text) }
             } else {
                 do {
+                    let version = try FileRevision.read(f.url)
                     var file = try TextFile.read(f.url)
-                    file.text = try options.replaceAll(in: file.text, with: replacement).0
-                    try file.write(to: f.url)
+                    guard file.text == f.text, !f.url.hasDirectoryPath, (try f.url.resourceValues(forKeys: [.isSymbolicLinkKey])).isSymbolicLink != true else { failed.append(f.url.lastPathComponent); continue }
+                    file.text = try f.replacing(options: options, template: replacement)
+                    try file.write(to: f.url, matching: version)
                 } catch {
                     failed.append(f.url.lastPathComponent)
                 }
             }
         }
-        if !failed.isEmpty { error = "Couldn't write: " + failed.joined(separator: ", ") }
         run(root: ws.root)
+        if !failed.isEmpty { error = "Files changed or could not be written: " + failed.joined(separator: ", ") }
     }
 }
 
@@ -322,7 +345,7 @@ struct SearchPanel: View {
                 Toggle("AB", isOn: $search.options.preserveCase).help("Preserve Case")
                 Button { search.replaceAll(in: ws) } label: { Image(systemName: "text.badge.checkmark") }
                     .help("Replace All")
-                    .disabled(search.results.isEmpty)
+                    .disabled(!search.canReplace)
             }
             TextField("Files to include (e.g. *.swift, src/*)", text: $search.include)
             TextField("Files to exclude", text: $search.exclude)
@@ -336,6 +359,7 @@ struct SearchPanel: View {
         .buttonStyle(.borderless)
         .controlSize(.small)
         .padding(.horizontal, 10)
+        .onChange(of: ws.root, initial: true) { search.run(root: ws.root) }
         .onChange(of: search.options) { search.run(root: ws.root) }
         .onChange(of: search.include) { search.run(root: ws.root) }
         .onChange(of: search.exclude) { search.run(root: ws.root) }
@@ -345,7 +369,7 @@ struct SearchPanel: View {
             ForEach(search.results) { f in
                 DisclosureGroup(isExpanded: .constant(true)) {
                     ForEach(f.matches) { m in
-                        MatchRow(match: m, replacement: search.replacement.isEmpty ? nil : search.replacement)
+                        MatchRow(match: m, replacement: preview(m, in: f.text))
                             .contentShape(Rectangle())
                             .onTapGesture { ws.reveal(f.url, m.range) }
                     }
@@ -362,12 +386,17 @@ struct SearchPanel: View {
         .listStyle(.sidebar)
     }
 
+    private func preview(_ match: LineMatch, in text: String) -> String? {
+        guard search.canReplace, let value = try? match.replacement(in: text, options: search.options, template: search.replacement) else { return nil }
+        return value.isEmpty ? "∅" : value
+    }
+
     private var summary: String {
         if let e = search.error { return e }
         if ws.root == nil { return "Open a folder to search in files." }
         if search.options.query.isEmpty { return "" }
         if search.running && search.results.isEmpty { return "Searching…" }
-        return "\(search.total) results in \(search.results.count) files"
+        return "\(search.total) results in \(search.results.count) files" + (search.truncated ? " · Partial results (search budget reached)" : "")
     }
 
     private func relative(_ url: URL) -> String {
