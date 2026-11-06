@@ -17,6 +17,7 @@ final class Buffer: NSObject, Identifiable {
             if !modes.contains(viewMode) { viewMode = modes[0] }
         }
     }
+    var readEncoding: String.Encoding?
     var encoding: String.Encoding = .utf8
     var lineEnding: LineEnding = .lf
     var isDirty = false
@@ -24,7 +25,14 @@ final class Buffer: NSObject, Identifiable {
     var caretLine = 1
     var caretColumn = 1
     var revision = 0          // bumps on every text change (observed by tree/preview views)
-    var viewMode: ViewMode = .text
+    var viewMode: ViewMode = .text { didSet { onEdit?(self) } }
+    var indentOverride: String?
+    var indentUnit: String { indentOverride ?? EditorSettings.shared.unit }
+    var pinned = false
+    var scrollFraction = 0.0
+    var previewScroll = 0.0
+    var syncScroll = 0.0
+    weak var workspace: Workspace?
     var reveal: NSRange?      // set to select + scroll to a range in the editor
 
     @ObservationIgnored var selection = NSRange(location: 0, length: 0)
@@ -106,7 +114,7 @@ final class Buffer: NSObject, Identifiable {
         setText(text)
     }
 
-    static func load(_ url: URL, id: UUID = UUID()) throws -> Buffer {
+    static func load(_ url: URL, id: UUID = UUID(), encoding: String.Encoding? = nil) throws -> Buffer {
         var lang = Language.detect(url)
         if lang == .sqlite, !Self.hasSQLiteHeader(url) { lang = .plain }  // a ".db" that isn't SQLite: open as text
         if lang.isBinaryData {
@@ -117,9 +125,11 @@ final class Buffer: NSObject, Identifiable {
             return b
         }
         let data = try Data(contentsOf: url)
-        let file = try TextFile.decode(data)
+        let file = try TextFile.decode(data, encoding: encoding)
         let b = Buffer(id: id, url: url, text: file.text)
         if b.language != lang { b.language = lang }
+        b.readEncoding = encoding
+        b.indentOverride = Indentation.detect(file.text)
         b.encoding = file.encoding
         b.lineEnding = file.lineEnding
         b.diskDate = modificationDate(url)
@@ -138,6 +148,7 @@ final class Buffer: NSObject, Identifiable {
         precondition(!language.isBinaryData, "binary data files are never written as text")
         try TextFile(text: text, encoding: encoding, lineEnding: lineEnding).write(to: url, matching: expected)
         self.url = url
+        readEncoding = encoding
         isDirty = false
         conflict = false
         diskDate = modificationDate(url)
@@ -154,7 +165,7 @@ final class Buffer: NSObject, Identifiable {
         guard let url else { return }
         if language.isBinaryData { diskDate = modificationDate(url); revision += 1; return }
         let data = try Data(contentsOf: url)
-        let file = try TextFile.decode(data)
+        let file = try TextFile.decode(data, encoding: readEncoding)
         setText(file.text)
         encoding = file.encoding
         lineEnding = file.lineEnding
@@ -284,8 +295,9 @@ final class EditorGroup: Identifiable {
 
     func show(_ b: Buffer) {
         if !tabs.contains(b) {
-            let at = active.flatMap { tabs.firstIndex(of: $0) }.map { $0 + 1 } ?? tabs.count
-            tabs.insert(b, at: at)
+            let proposed = active.flatMap { tabs.firstIndex(of: $0) }.map { $0 + 1 } ?? tabs.count
+            let pinnedCount = tabs.filter(\.pinned).count
+            tabs.insert(b, at: b.pinned ? min(proposed, pinnedCount) : max(proposed, pinnedCount))
         }
         active = b
     }
@@ -357,8 +369,7 @@ final class FileNode: Identifiable {
     }
 }
 
-/// The window's state. Single window for v1.
-// ponytail: one global workspace / one window; make per-window when multi-window lands.
+/// Independent state and recovery store for one window. Shared buffers belong only to its panes.
 @Observable
 final class Workspace {
     static let shared = Workspace()
@@ -368,9 +379,21 @@ final class Workspace {
             guard root != oldValue else { return }
             tree = root.map { FileNode(url: $0, isDirectory: true) }
             tree?.load()
+            watchFiles()
+            if languageServer != nil { restartLanguageServer() }
             scheduleSave()
         }
     }
+    var palette: PaletteMode?
+    enum PaletteMode: String, Identifiable { case files, commands; var id: String { rawValue } }
+    var fileIndex: [URL] = []
+    var treeFilter = ""
+    var renaming: URL?
+    var renameText = ""
+    @ObservationIgnored var watcher: FileWatcher?
+    @ObservationIgnored var watcherTask: Task<Void, Never>?
+    @ObservationIgnored var indexTask: Task<Void, Never>?
+    @ObservationIgnored var refreshTask: Task<Void, Never>?
     var tree: FileNode?
     var sidebarVisible = true
     @ObservationIgnored private var closedURLs: [URL] = []  // ⇧⌘T, most recent last
@@ -393,7 +416,7 @@ final class Workspace {
     @ObservationIgnored var tabFrames: [UUID: [UUID: CGRect]] = [:]
     @ObservationIgnored var tabStripFrames: [UUID: CGRect] = [:]
     var verticalTabs = false { didSet { scheduleSave() } }
-    var wrap = false { didSet { scheduleSave() } }
+    var wrap = EditorSettings.shared.wrap { didSet { scheduleSave() } }
     var sidebarMode: SidebarMode = .files
     var statusMessage: String?
     var formatOnSave = UserDefaults.standard.bool(forKey: "formatOnSave") {
@@ -401,6 +424,8 @@ final class Workspace {
     }
     @ObservationIgnored private var statusTask: Task<Void, Never>?
     @ObservationIgnored private var formatting = Set<UUID>()
+    @ObservationIgnored var markdownExporter: MarkdownExporter?
+    @ObservationIgnored var languageServer: LanguageServer?
     let find = FindController()
     let projectSearch = ProjectSearch()
 
@@ -427,6 +452,8 @@ final class Workspace {
         self.checkpointSleep = checkpointSleep
         restore()
         layout = paneLayout
+        watchFiles()
+        if !EditorSettings.shared.lspCommand.isEmpty { restartLanguageServer() }
     }
 
     // MARK: Files
@@ -441,8 +468,9 @@ final class Workspace {
     }
 
     func open(_ url: URL) {
+        NSDocumentController.shared.noteNewRecentDocumentURL(url)
         if (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true {
-            root = url
+            root = FileSearch.canonicalURL(url)
             return
         }
         if let b = allBuffers.first(where: { $0.url?.standardizedFileURL == url.standardizedFileURL }) {
@@ -458,6 +486,8 @@ final class Workspace {
                     tabFrames[g.id]?[only.id] = nil
                 }
                 g.show(b)
+                watchFiles()
+                languageServer?.sync(b)
             } catch {
                 alert("Can't open “\(url.lastPathComponent)”", error)
             }
@@ -588,7 +618,11 @@ final class Workspace {
         if b.language.isBinaryData { flash("“\(b.name)” is opened read-only"); return true }
         do {
             let expected = try expected ?? FileRevision.read(url)
+            let previousURL = b.url
             try b.write(to: url, matching: expected)
+            NSDocumentController.shared.noteNewRecentDocumentURL(url)
+            watchFiles()
+            if b.url != previousURL, languageServer != nil { restartLanguageServer() }
             scheduleSave()
             return true
         } catch TextFile.Failure.unrepresentable {
@@ -626,6 +660,7 @@ final class Workspace {
         if let url = b.url, !elsewhere { closedURLs.removeAll { $0 == url }; closedURLs.append(url) }
         if draggingTabID == b.id { cancelTabDrag() }
         g.remove(b)
+        if !elsewhere { languageServer?.closed(b) }
         tabFrames[g.id]?[b.id] = nil
         dropIfEmpty(g)
         scheduleSave()
@@ -678,18 +713,28 @@ final class Workspace {
     }
 
     func closeOthers(_ b: Buffer, in g: EditorGroup) {
-        for other in g.tabs where other !== b { close(other, in: g) }
+        for other in g.tabs where other !== b && !other.pinned { close(other, in: g) }
     }
 
     enum Side { case left, right }
 
     func closeTabs(to side: Side, of b: Buffer, in g: EditorGroup) {
         guard let i = g.tabs.firstIndex(of: b) else { return }
-        for other in side == .left ? Array(g.tabs[..<i]) : Array(g.tabs[(i + 1)...]) { close(other, in: g) }
+        for other in side == .left ? Array(g.tabs[..<i]) : Array(g.tabs[(i + 1)...]) where !other.pinned { close(other, in: g) }
+    }
+
+    func closeSaved(in g: EditorGroup) {
+        for b in g.tabs where !b.isDirty && !b.pinned { close(b, in: g) }
+    }
+
+    func togglePin(_ b: Buffer, in g: EditorGroup) {
+        b.pinned.toggle()
+        g.tabs = g.tabs.filter(\.pinned) + g.tabs.filter { !$0.pinned }
+        scheduleSave()
     }
 
     func closeAll(in g: EditorGroup) {
-        for b in g.tabs { close(b, in: g) }
+        for b in g.tabs where !b.pinned { close(b, in: g) }
     }
 
     /// ⌘W: close the focused tab, or the focused pane itself when it has no tabs.
@@ -772,6 +817,7 @@ final class Workspace {
         var reordered = target.tabs.filter { $0 !== b }
         let at = before.flatMap { reordered.firstIndex(of: $0) }.map { $0 + (after ? 1 : 0) } ?? reordered.count
         reordered.insert(b, at: at)
+        reordered = reordered.filter(\.pinned) + reordered.filter { !$0.pinned }
         if source === target {
             guard reordered.map(\.id) != target.tabs.map(\.id) else { return false }
             // Reordering must not select a neighbour and rebuild the active editor.
@@ -852,7 +898,11 @@ final class Workspace {
     // MARK: Session (hot exit)
 
     private func attach(_ b: Buffer) {
-        b.onEdit = { [weak self] buffer in self?.scheduleSave(edited: buffer) }
+        b.workspace = self
+        b.onEdit = { [weak self] buffer in
+            self?.scheduleSave(edited: buffer)
+            self?.languageServer?.sync(buffer)
+        }
     }
 
     func scheduleSave(edited b: Buffer? = nil) {
@@ -874,7 +924,8 @@ final class Workspace {
         let session = Session(
             tabs: buffers.map {
                 .init(id: $0.id, path: $0.url?.path, dirty: $0.isDirty, encoding: $0.encoding.rawValue,
-                      lineEnding: $0.lineEnding, language: $0.language, selection: $0.selection.location, diskDate: $0.diskDate)
+                      lineEnding: $0.lineEnding, language: $0.language, selection: $0.selection.location, diskDate: $0.diskDate,
+                      viewMode: $0.viewMode.rawValue, scroll: $0.scrollFraction, previewScroll: $0.previewScroll, pinned: $0.pinned, readEncoding: $0.readEncoding?.rawValue)
             },
             groups: groups.map { .init(tabs: $0.tabs.map(\.id), active: $0.active?.id, id: $0.id) },
             focused: groups.firstIndex { $0 === focusedGroup } ?? 0,
@@ -904,19 +955,24 @@ final class Workspace {
                 b.diskDate = t.diskDate
                 if let url, let d = modificationDate(url), d != t.diskDate { b.conflict = true }
             } else if let url {
-                guard let loaded = try? Buffer.load(url, id: t.id) else { continue }  // file gone
+                guard let loaded = try? Buffer.load(url, id: t.id, encoding: t.readEncoding.map { String.Encoding(rawValue: $0) }) else { continue }  // file gone
                 b = loaded
             } else if !t.dirty {
                 b = Buffer(id: t.id, url: nil)
             } else {
                 continue
             }
+            b.readEncoding = t.readEncoding.map { String.Encoding(rawValue: $0) }
             if t.dirty {
                 b.encoding = String.Encoding(rawValue: t.encoding)
                 b.lineEnding = t.lineEnding
             }
             if b.language != t.language { b.language = t.language }
             b.selection = NSRange(location: min(t.selection, b.storage.length), length: 0)
+            if let mode = t.viewMode.flatMap(Buffer.ViewMode.init(rawValue:)), b.modes.contains(mode) { b.viewMode = mode }
+            b.scrollFraction = t.scroll ?? 0
+            b.previewScroll = t.previewScroll ?? 0
+            b.pinned = t.pinned ?? false
             attach(b)
             byID[t.id] = b
         }
@@ -931,7 +987,7 @@ final class Workspace {
             layout = s.layout?.retaining(Set(restored.map(\.id)))
             focusedID = restored[min(s.focused, restored.count - 1)].id
         }
-        root = s.root.map { URL(filePath: $0, directoryHint: .isDirectory) }
+        root = s.root.map { FileSearch.canonicalURL(URL(filePath: $0, directoryHint: .isDirectory)) }
         verticalTabs = s.verticalTabs
         wrap = s.wrap
         saveTask?.cancel()
@@ -943,6 +999,6 @@ final class Workspace {
         a.messageText = title
         a.informativeText = (error as? TextFile.Failure) == .binary ? "It looks like a binary file."
             : (error as? ParseError)?.description ?? error.localizedDescription
-        a.runModal()
+        _ = presentAlert(a)
     }
 }

@@ -39,10 +39,13 @@ public struct TextFile: Sendable, Equatable {
     }
 
     // ponytail: a UTF-8 BOM is dropped on read and not rewritten on save.
-    public static func decode(_ data: Data) throws -> TextFile {
+    public static func decode(_ data: Data, encoding override: String.Encoding? = nil) throws -> TextFile {
         var body = data
         let encoding: String.Encoding
-        if data.starts(with: [0xEF, 0xBB, 0xBF]) {
+        if let override {
+            encoding = override
+            if override == .utf8, data.starts(with: [0xEF, 0xBB, 0xBF]) { body = data.dropFirst(3) }
+        } else if data.starts(with: [0xEF, 0xBB, 0xBF]) {
             encoding = .utf8
             body = data.dropFirst(3)
         } else if data.starts(with: [0xFF, 0xFE]) || data.starts(with: [0xFE, 0xFF]) {

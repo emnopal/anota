@@ -5,15 +5,114 @@ import SwiftUI
 @main
 struct AnotaApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
-    private let ws = Workspace.shared
-
     var body: some Scene {
-        Window("Anota", id: "main") {
-            ContentView(ws: ws)
-                .frame(minWidth: 720, minHeight: 420)
-                .onOpenURL { ws.open($0) }
+        WindowGroup("Anota", id: "workspace", for: String.self) { $id in
+            WorkspaceWindow(restoredID: id)
+        }.restorationBehavior(.disabled)
+        .commands { WindowCommands() }
+        Settings { SettingsView() }
+    }
+}
+
+private struct WorkspaceKey: FocusedValueKey { typealias Value = Workspace }
+extension FocusedValues {
+    var workspace: Workspace? {
+        get { self[WorkspaceKey.self] }
+        set { self[WorkspaceKey.self] = newValue }
+    }
+}
+
+final class WindowWorkspaces {
+    static let shared = WindowWorkspaces()
+    var workspaces: [String: Workspace] = [:]
+    private var recoveryIDs = Set<String>()
+    private var unclaimedRestoreIDs = Set<String>()
+    var quitting = false
+    var restored = false
+    var pendingNewFile = false
+    var pendingOpen = false
+    let restoreIDs = UserDefaults.standard.stringArray(forKey: "workspaceWindows") ?? []
+    init() { unclaimedRestoreIDs = Set(restoreIDs) }
+    func newID() -> String {
+        if workspaces.isEmpty { return (!restored ? restoreIDs.first : recoveryIDs.first) ?? UUID().uuidString }
+        return UUID().uuidString
+    }
+    func persistWindows() { UserDefaults.standard.set(Set(workspaces.keys).union(recoveryIDs).union(unclaimedRestoreIDs).sorted(), forKey: "workspaceWindows") }
+    func close(_ id: String) {
+        guard !quitting else { return }
+        if workspaces[id]?.allBuffers.contains(where: \.isDirty) == true { recoveryIDs.insert(id) }
+        else { recoveryIDs.remove(id) }
+        workspaces[id]?.languageServer?.stop()
+        workspaces.removeValue(forKey: id)
+        persistWindows()
+    }
+    func workspace(_ id: String) -> Workspace {
+        if let ws = workspaces[id] { return ws }
+        let store = SessionStore(dir: SessionStore.standard.dir.appending(path: "windows/" + id))
+        if !UserDefaults.standard.bool(forKey: "migratedWindowSessions"), let (session, texts) = SessionStore.standard.load() {
+            do {
+                try store.save(session, changed: texts)
+                UserDefaults.standard.set(true, forKey: "migratedWindowSessions")
+            } catch { return Workspace.shared }
         }
-        .commands { AppCommands(ws: ws) }
+        let ws = Workspace(store: store)
+        recoveryIDs.remove(id)
+        unclaimedRestoreIDs.remove(id)
+        workspaces[id] = ws
+        persistWindows()
+        return ws
+    }
+}
+
+struct WorkspaceWindow: View {
+    let restoredID: String?
+    @SceneStorage("workspaceID") private var sceneID = WindowWorkspaces.shared.newID()
+    @Environment(\.openWindow) private var openWindow
+    var body: some View {
+        let id = restoredID ?? sceneID
+        let registry = WindowWorkspaces.shared
+        let ws = registry.workspace(id)
+        ContentView(ws: ws)
+            .frame(minWidth: 720, minHeight: 420)
+            .focusedSceneValue(\.workspace, ws)
+            // Reuse the most recently active scene for Finder/Open With events.
+            .handlesExternalEvents(preferring: ["*"], allowing: ["*"])
+            .onOpenURL { ws.open($0) }
+            .task {
+                if registry.pendingNewFile { registry.pendingNewFile = false; ws.newFile() }
+                if registry.pendingOpen { registry.pendingOpen = false; DispatchQueue.main.async { ws.openPanel() } }
+                if !registry.restored {
+                    registry.restored = true
+                    for other in registry.restoreIDs where other != id { openWindow(id: "workspace", value: other) }
+                }
+            }
+            .onDisappear {
+                if ws.saveSession() { registry.close(id) }
+            }
+
+    }
+}
+
+struct WindowCommands: Commands {
+    @FocusedValue(\.workspace) var focused
+    @Environment(\.openWindow) var openWindow
+    var body: some Commands {
+        if let focused { AppCommands(ws: focused) }
+        else {
+            CommandGroup(replacing: .newItem) {
+                Button("New File") {
+                    WindowWorkspaces.shared.pendingNewFile = true
+                    openWindow(id: "workspace")
+                }.keyboardShortcut("n")
+                Button("Open…") {
+                    WindowWorkspaces.shared.pendingOpen = true
+                    openWindow(id: "workspace")
+                }.keyboardShortcut("o")
+            }
+        }
+        CommandGroup(after: .newItem) {
+            Button("New Window") { openWindow(id: "workspace") }.keyboardShortcut("n", modifiers: [.command, .shift])
+        }
     }
 }
 
@@ -28,28 +127,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Persist recovery data before quitting; keep the app open if it fails.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        let ws = workspace ?? .shared
-        while !ws.saveSession() {
-            let alert = NSAlert()
-            alert.messageText = "Couldn't save recovery data"
-            alert.informativeText = "Anota will stay open unless recovery succeeds. Free disk space and retry, or save your unsaved documents elsewhere."
-            alert.addButton(withTitle: "Retry")
-            alert.addButton(withTitle: "Save As…")
-            alert.addButton(withTitle: "Cancel Quit")
-            switch presentAlert(alert) {
-            case .alertFirstButtonReturn: continue
-            case .alertSecondButtonReturn:
-                for buffer in ws.allBuffers where buffer.isDirty {
-                    guard ws.saveAs(buffer) else { return .terminateCancel }
+        let workspaces = workspace.map { [$0] } ?? (WindowWorkspaces.shared.workspaces.isEmpty ? [Workspace.shared] : Array(WindowWorkspaces.shared.workspaces.values))
+        for ws in workspaces {
+            while !ws.saveSession() {
+                let alert = NSAlert()
+                alert.messageText = "Couldn't save recovery data"
+                alert.informativeText = "Anota will stay open unless recovery succeeds. Free disk space and retry, or save your unsaved documents elsewhere."
+                alert.addButton(withTitle: "Retry")
+                alert.addButton(withTitle: "Save As…")
+                alert.addButton(withTitle: "Cancel Quit")
+                switch presentAlert(alert) {
+                case .alertFirstButtonReturn: continue
+                case .alertSecondButtonReturn:
+                    for buffer in ws.allBuffers where buffer.isDirty {
+                        guard ws.saveAs(buffer) else { return .terminateCancel }
+                    }
+                    if !ws.saveSession() { return .terminateCancel }
+                    break
+                default: return .terminateCancel
                 }
-                return ws.saveSession() ? .terminateNow : .terminateCancel
-            default: return .terminateCancel
             }
         }
+        WindowWorkspaces.shared.quitting = true
         return .terminateNow
     }
 
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 
 
 }
@@ -60,16 +163,28 @@ struct AppCommands: Commands {
     var body: some Commands {
         CommandGroup(replacing: .newItem) {
             Button("New File") { ws.newFile() }.keyboardShortcut("n")
+            Menu("Open Recent") {
+                ForEach(NSDocumentController.shared.recentDocumentURLs, id: \.self) { url in
+                    Button(url.path) { ws.open(url) }
+                }
+                Divider()
+                Button("Clear Menu") { NSDocumentController.shared.clearRecentDocuments(nil) }
+            }
+            Button("Quick Open…") { ws.palette = .files }.keyboardShortcut("p")
+            Button("Command Palette…") { ws.palette = .commands }.keyboardShortcut("p", modifiers: [.command, .shift])
             Button("Open…") { ws.openPanel() }.keyboardShortcut("o")
             Divider()
             Button("Reopen Closed Tab") { ws.reopenClosed() }.keyboardShortcut("t", modifiers: [.command, .shift])
             Divider()
             Button("Close Tab") { ws.closeActive() }.keyboardShortcut("w")
+            Button("Close Saved") { ws.groups.forEach(ws.closeSaved) }
             Button("Close All Tabs") { ws.groups.forEach(ws.closeAll) }.keyboardShortcut("w", modifiers: [.command, .option])
         }
         CommandGroup(replacing: .saveItem) {
             Button("Save") { if let b = ws.active { ws.saveCommand(b) } }.keyboardShortcut("s")
             Button("Save As…") { if let b = ws.active { ws.saveAs(b) } }.keyboardShortcut("s", modifiers: [.command, .shift])
+            Button("Export Markdown as HTML…") { ws.exportMarkdown(pdf: false) }.disabled(ws.active?.language != .markdown)
+            Button("Export Markdown as PDF…") { ws.exportMarkdown(pdf: true) }.disabled(ws.active?.language != .markdown)
             Button("Save All") { ws.saveAll() }.keyboardShortcut("s", modifiers: [.command, .option])
         }
         CommandGroup(after: .textEditing) {
@@ -98,7 +213,7 @@ struct AppCommands: Commands {
             Button("Minify JSON") { ws.minifyJSON() }
         }
         CommandGroup(after: .sidebar) {
-            Button("Toggle Sidebar") { ws.sidebarVisible.toggle() }.keyboardShortcut("b")
+            Button("Toggle Sidebar") { ws.sidebarVisible.toggle() }.keyboardShortcut("b", modifiers: [.command, .control])
             Button("Show Explorer") { ws.sidebarVisible = true; ws.sidebarMode = .files }
                 .keyboardShortcut("e", modifiers: [.command, .shift])
             Divider()
@@ -117,6 +232,11 @@ struct AppCommands: Commands {
         }
         // VS Code editing shortcuts. Sent down the responder chain to the focused editor (CodeTextView).
         CommandMenu("Selection") {
+            line("Complete", #selector(NSTextView.complete(_:)), " ", .control)
+            line("Bold", #selector(CodeTextView.markdownBold(_:)), "b")
+            line("Italic", #selector(CodeTextView.markdownItalic(_:)), "i")
+            line("Add Cursor Above", #selector(CodeTextView.addCursorAbove(_:)), .upArrow, [.command, .option])
+            line("Add Cursor Below", #selector(CodeTextView.addCursorBelow(_:)), .downArrow, [.command, .option])
             line("Toggle Line Comment", #selector(CodeTextView.toggleLineComment(_:)), "/")
             Divider()
             line("Expand Line Selection", #selector(CodeTextView.expandLineSelection(_:)), "l")
@@ -134,6 +254,8 @@ struct AppCommands: Commands {
             line("Outdent Line", #selector(CodeTextView.outdentLines(_:)), "[")
         }
         CommandMenu("Go") {
+            Button("Go to Definition") { ws.goToDefinition() }
+            Divider()
             Button("Go to Line…") { ws.goToLine() }.keyboardShortcut("g", modifiers: .control)
             Divider()
             Button("Next Tab") { ws.cycleTab(1) }.keyboardShortcut(.tab, modifiers: .control)

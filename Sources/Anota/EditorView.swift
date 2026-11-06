@@ -3,15 +3,17 @@ import AnotaCore
 import SwiftUI
 
 enum Theme {
-    static let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
-    static let gutterFont = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+    static var font: NSFont { NSFontManager.shared.font(withFamily: EditorSettings.shared.fontName, traits: [], weight: 5, size: min(36, max(9, EditorSettings.shared.fontSize))) ?? NSFont.monospacedSystemFont(ofSize: 13, weight: .regular) }
+    static var gutterFont: NSFont { NSFont.monospacedDigitSystemFont(ofSize: max(10, font.pointSize - 2), weight: .regular) }
     static let lineSpacing: CGFloat = 3
 
-    static let baseAttributes: [NSAttributedString.Key: Any] = {
+    static var baseAttributes: [NSAttributedString.Key: Any] {
         let p = NSMutableParagraphStyle()
         p.lineSpacing = lineSpacing
+        p.tabStops = []
+        p.defaultTabInterval = (" " as NSString).size(withAttributes: [.font: font]).width * CGFloat(EditorSettings.shared.tabWidth)
         return [.font: font, .foregroundColor: NSColor.textColor, .paragraphStyle: p]
-    }()
+    }
 
     // System colors adapt to light/dark automatically.
     static func color(_ t: Token) -> NSColor {
@@ -39,6 +41,7 @@ struct EditorView: NSViewRepresentable {
     let buffer: Buffer
     let wrap: Bool
     let reveal: NSRange?
+    var syncFraction: Double = 0
     var isActive: () -> Bool = { true }
     let onFocus: () -> Void
 
@@ -56,6 +59,7 @@ struct EditorView: NSViewRepresentable {
 
         let tv = CodeTextView(frame: .zero, textContainer: tc)
         tv.configure()
+        tv.applySettings()
         tv.delegate = coordinator
         tv.onFocus = onFocus
         tv.buffer = buffer
@@ -74,10 +78,13 @@ struct EditorView: NSViewRepresentable {
         tv.setSelectedRange(sel)
         DispatchQueue.main.async {
             guard tv.buffer === buffer, coordinator.buffer === buffer, isActive(), tv.window != nil else { return }
-            tv.scrollRangeToVisible(sel)
+            tv.restoreScroll()
+            if reveal != nil { tv.scrollRangeToVisible(sel) }
             tv.window?.makeFirstResponder(tv)
             if reveal != nil { buffer.reveal = nil }
         }
+        scroll.contentView.postsBoundsChangedNotifications = true
+        NotificationCenter.default.addObserver(tv, selector: #selector(CodeTextView.scrolled), name: NSView.boundsDidChangeNotification, object: scroll.contentView)
         return scroll
     }
 
@@ -95,7 +102,12 @@ struct EditorView: NSViewRepresentable {
             buffer.highlightAll()
             tv.setSelectedRange(clamp(buffer.selection))
         }
+        tv.applySettings()
         coordinator.applyWrap(wrap, tv, scroll)
+        if buffer.viewMode == .split, abs(buffer.syncScroll - coordinator.lastSync) > 0.001 {
+            coordinator.lastSync = buffer.syncScroll
+            tv.restoreScroll(fraction: buffer.syncScroll)
+        }
         if let r = reveal {
             let r = clamp(r)
             tv.setSelectedRange(r)
@@ -120,8 +132,13 @@ struct EditorView: NSViewRepresentable {
     final class Coordinator: NSObject, NSTextViewDelegate {
         var buffer: Buffer
         private var wrapApplied: Bool?
+        var lastSync = 0.0
 
         init(buffer: Buffer) { self.buffer = buffer }
+
+        func textView(_ textView: NSTextView, completions words: [String], forPartialWordRange charRange: NSRange, indexOfSelectedItem index: UnsafeMutablePointer<Int>?) -> [String] {
+            buffer.workspace?.languageServer?.completionWords ?? words
+        }
 
         // Per-buffer undo stack instead of the window's shared one.
         func undoManager(for view: NSTextView) -> UndoManager? { buffer.undoManager }
@@ -131,6 +148,8 @@ struct EditorView: NSViewRepresentable {
             let loc = tv.selectedRange().location
             let s = tv.string as NSString
             buffer.selection = tv.selectedRange()
+            (tv as? CodeTextView)?.highlightBrackets()
+            buffer.workspace?.scheduleSave()
             buffer.caretLine = buffer.lines.line(at: loc)
             buffer.caretColumn = loc - s.lineRange(for: NSRange(location: loc, length: 0)).location + 1
         }
@@ -156,6 +175,60 @@ struct EditorView: NSViewRepresentable {
 final class CodeTextView: NSTextView {
     var onFocus: (() -> Void)?
     weak var buffer: Buffer?
+    private var settingsSignature = ""
+    private var restoringScroll = false
+    private var bracketRanges: [NSRange] = []
+    // TextKit 1 discards all but one empty range; retain insertion points between keystrokes.
+    private var multipleRanges: [NSValue]?
+    private var settingRanges = false
+    override var selectedRanges: [NSValue] {
+        get { multipleRanges ?? super.selectedRanges }
+        set { setSelectedRanges(newValue, affinity: .downstream, stillSelecting: false) }
+    }
+    override func setSelectedRange(_ charRange: NSRange) {
+        if !settingRanges { multipleRanges = nil }
+        super.setSelectedRange(charRange)
+    }
+    private var ws: Workspace { buffer?.workspace ?? Workspace.shared }
+    private var indentUnit: String { buffer?.indentUnit ?? EditorSettings.shared.unit }
+
+    func applySettings() {
+        let settings = EditorSettings.shared
+        let signature = "\(settings.fontName)/\(settings.fontSize)/\(settings.tabWidth)/\(settings.theme)"
+        guard signature != settingsSignature else { return }
+        settingsSignature = signature
+        font = Theme.font
+        typingAttributes = Theme.baseAttributes
+        textStorage?.addAttributes(Theme.baseAttributes, range: NSRange(location: 0, length: textStorage?.length ?? 0))
+        appearance = settings.theme == "System" ? nil : NSAppearance(named: ["Dark", "Midnight"].contains(settings.theme) ? .darkAqua : .aqua)
+        backgroundColor = settings.theme == "Solarized" ? NSColor(red: 0.99, green: 0.96, blue: 0.89, alpha: 1)
+            : settings.theme == "Midnight" ? NSColor(red: 0.07, green: 0.09, blue: 0.15, alpha: 1) : .textBackgroundColor
+        (enclosingScrollView?.verticalRulerView as? LineNumberRuler)?.textChanged()
+    }
+
+    @objc func scrolled() {
+        guard !restoringScroll, let scroll = enclosingScrollView, let buffer else { return }
+        let maxY = max(1, bounds.height - scroll.contentView.bounds.height)
+        buffer.scrollFraction = min(1, max(0, scroll.contentView.bounds.minY / maxY))
+        if window?.firstResponder === self { buffer.syncScroll = buffer.scrollFraction }
+        ws.scheduleSave()
+    }
+
+    func restoreScroll(fraction: Double? = nil) {
+        guard let scroll = enclosingScrollView, let buffer else { return }
+        restoringScroll = true
+        scroll.contentView.scroll(to: NSPoint(x: scroll.contentView.bounds.minX, y: max(0, bounds.height - scroll.contentView.bounds.height) * (fraction ?? buffer.scrollFraction)))
+        scroll.reflectScrolledClipView(scroll.contentView)
+        restoringScroll = false
+    }
+
+    func highlightBrackets() {
+        guard let lm = layoutManager else { return }
+        for r in bracketRanges where NSMaxRange(r) <= (string as NSString).length { lm.removeTemporaryAttribute(.underlineStyle, forCharacterRange: r) }
+        bracketRanges = selectedRange().length == 0 ? BracketMatch.ranges(in: string as NSString, caret: selectedRange().location) : []
+        for r in bracketRanges { lm.addTemporaryAttribute(.underlineStyle, value: NSUnderlineStyle.thick.rawValue, forCharacterRange: r) }
+    }
+
 
     func configure() {
         isRichText = false
@@ -171,6 +244,8 @@ final class CodeTextView: NSTextView {
         isContinuousSpellCheckingEnabled = false
         isGrammarCheckingEnabled = false
         smartInsertDeleteEnabled = false
+        // Pane drop targets handle file URLs; NSTextView otherwise inserts their paths as text.
+        unregisterDraggedTypes()
         font = Theme.font
         typingAttributes = Theme.baseAttributes
         textContainerInset = NSSize(width: 4, height: 8)
@@ -194,7 +269,7 @@ final class CodeTextView: NSTextView {
         guard let content = window?.contentView else { return false }
         var p = content.convert(e.locationInWindow, from: nil)
         if !content.isFlipped { p.y = content.bounds.height - p.y }
-        return Workspace.shared.find.barFrame.contains(p)
+        return ws.find.barFrame.contains(p)
     }
 
     override func mouseMoved(with event: NSEvent) {
@@ -211,7 +286,7 @@ final class CodeTextView: NSTextView {
         let menu = super.menu(for: event) ?? NSMenu()
         menu.insertItem(.separator(), at: 0)
         let wrap = NSMenuItem(title: "Word Wrap", action: #selector(toggleWrap), keyEquivalent: "")
-        wrap.state = Workspace.shared.wrap ? .on : .off
+        wrap.state = ws.wrap ? .on : .off
         menu.insertItem(wrap, at: 0)
         menu.insertItem(.separator(), at: 0)
         let sel = NSMenuItem(title: "Format Selection", action: #selector(formatSelection), keyEquivalent: "")
@@ -221,14 +296,14 @@ final class CodeTextView: NSTextView {
         return menu
     }
 
-    @objc private func toggleWrap() { Workspace.shared.wrap.toggle() }
+    @objc private func toggleWrap() { ws.wrap.toggle() }
 
     @objc private func formatDocument() {
-        if let b = buffer ?? Workspace.shared.active { Task { await Workspace.shared.format(b) } }
+        if let b = buffer ?? ws.active { Task { await ws.format(b) } }
     }
 
     @objc private func formatSelection() {
-        if let b = buffer ?? Workspace.shared.active { Task { await Workspace.shared.format(b, selection: true) } }
+        if let b = buffer ?? ws.active { Task { await ws.format(b, selection: true) } }
     }
 
     override func validateMenuItem(_ item: NSMenuItem) -> Bool {
@@ -269,7 +344,7 @@ final class CodeTextView: NSTextView {
     @objc func outdentLines(_ sender: Any?) { reindent(outdent: true) }
 
     private func reindent(outdent: Bool) {
-        let r = selectedLines, new = LineEdits.indent(substring(r), outdent: outdent)
+        let r = selectedLines, new = LineEdits.indent(substring(r), unit: indentUnit, outdent: outdent)
         edit(r, new, select: NSRange(location: r.location, length: (new as NSString).length - (new.hasSuffix("\n") ? 1 : 0)))
     }
 
@@ -351,9 +426,9 @@ final class CodeTextView: NSTextView {
     }
 
     /// ⌘D: select the word at the caret; if something is selected, jump to its next occurrence (wrapping).
-    /// ponytail: single selection; VS Code adds a cursor per occurrence. Needs multi-cursor support.
+    /// Adds a native selection at the next occurrence, keeping existing selections.
     @objc func selectNextOccurrence(_ sender: Any?) {
-        let s = string as NSString, sel = selectedRange()
+        let s = string as NSString, sel = selectedRanges.last?.rangeValue ?? selectedRange()
         if sel.length == 0 {
             let word = selectionRange(forProposedRange: sel, granularity: .selectByWord)
             if word.length > 0 { setSelectedRange(word) }
@@ -362,11 +437,58 @@ final class CodeTextView: NSTextView {
         let needle = s.substring(with: sel)
         var found = s.range(of: needle, range: NSRange(location: NSMaxRange(sel), length: s.length - NSMaxRange(sel)))
         if found.location == NSNotFound { found = s.range(of: needle, range: NSRange(location: 0, length: sel.location)) }
+        let existing = selectedRanges.map(\.rangeValue)
+        if existing.contains(found) { NSSound.beep(); return }
         guard found.location != NSNotFound else { NSSound.beep(); return }
-        setSelectedRange(found)
+        var ranges = selectedRanges.map(\.rangeValue)
+        if !ranges.contains(found) { ranges.append(found) }
+        setSelectedRanges(ranges.sorted { $0.location < $1.location }.map { NSValue(range: $0) }, affinity: .downstream, stillSelecting: false)
         scrollRangeToVisible(found)
         showFindIndicator(for: found)
     }
+
+    private var showingCompletions = false
+    override func complete(_ sender: Any?) {
+        if showingCompletions { super.complete(sender); return }
+        guard let buffer else { return }
+        ws.languageServer?.complete(buffer, offset: selectedRange().location) { [weak self] in
+            guard let self else { return }
+            self.showingCompletions = true
+            self.complete(sender)
+            self.showingCompletions = false
+        }
+    }
+
+    @objc func addCursorAbove(_ sender: Any?) { addCursor(-1) }
+    @objc func addCursorBelow(_ sender: Any?) { addCursor(1) }
+    private func addCursor(_ step: Int) {
+        guard let buffer else { return }
+        var ranges = selectedRanges.map(\.rangeValue)
+        guard let edge = step < 0 ? ranges.first : ranges.last else { return }
+        let line = buffer.lines.line(at: edge.location), target = line + step
+        guard target >= 1, target <= buffer.lines.lineCount else { return }
+        let column = edge.location - buffer.lines.start(ofLine: line)
+        let start = buffer.lines.start(ofLine: target)
+        let end = target < buffer.lines.lineCount ? buffer.lines.start(ofLine: target + 1) - 1 : (string as NSString).length
+        let range = NSRange(location: min(end, start + column), length: 0)
+        guard !ranges.contains(range) else { return }
+        ranges.append(range)
+        setSelectedRanges(ranges.sorted { $0.location < $1.location }.map { NSValue(range: $0) }, affinity: .downstream, stillSelecting: false)
+    }
+
+    @objc func markdownBold(_ sender: Any?) { wrapMarkdown("**") }
+    @objc func markdownItalic(_ sender: Any?) { wrapMarkdown("*") }
+    private func wrapMarkdown(_ marker: String) {
+        guard buffer?.language == .markdown else { return }
+        let r = selectedRange(), inner = substring(r)
+        edit(r, marker + inner + marker, select: NSRange(location: r.location + marker.count, length: r.length))
+    }
+
+    override func insertTab(_ sender: Any?) {
+        if selectedRange().length > 0 { reindent(outdent: false) }
+        else { insertText(indentUnit, replacementRange: NSRange(location: NSNotFound, length: 0)) }
+    }
+    override func insertBacktab(_ sender: Any?) { reindent(outdent: true) }
 
     // MARK: Auto-closing pairs and indentation (logic in AnotaCore.AutoPair)
 
@@ -377,9 +499,13 @@ final class CodeTextView: NSTextView {
 
     override func insertText(_ string: Any, replacementRange: NSRange) {
         let s = (string as? String) ?? (string as? NSAttributedString)?.string ?? ""
-        if !hasMarkedText(), s.count == 1, let c = s.first, let lang = buffer?.language,
+        if selectedRanges.count > 1, !hasMarkedText(), replacementRange.location == NSNotFound {
+            replaceSelections(with: s)
+            return
+        }
+        if selectedRanges.count == 1, !hasMarkedText(), s.count == 1, let c = s.first, let lang = buffer?.language,
            replacementRange.location == NSNotFound || replacementRange == selectedRange(),
-           let e = AutoPair.type(c, in: self.string as NSString, selection: selectedRange(), language: lang) {
+           let e = AutoPair.type(c, in: self.string as NSString, selection: selectedRange(), language: lang, indentUnit: indentUnit) {
             apply(e)
             return
         }
@@ -387,22 +513,91 @@ final class CodeTextView: NSTextView {
     }
 
     override func deleteBackward(_ sender: Any?) {
-        if let lang = buffer?.language, let e = AutoPair.backspace(in: string as NSString, selection: selectedRange(), language: lang) {
+        if selectedRanges.count > 1, !hasMarkedText() {
+            let ns = string as NSString
+            let ranges = selectedRanges.map(\.rangeValue).map { r in
+                r.length > 0 || r.location == 0 ? r : ns.rangeOfComposedCharacterSequence(at: r.location - 1)
+            }
+            replaceSelections(with: "", ranges: ranges)
+            return
+        }
+        if selectedRanges.count == 1, let lang = buffer?.language, let e = AutoPair.backspace(in: string as NSString, selection: selectedRange(), language: lang) {
             apply(e)
             return
         }
         super.deleteBackward(sender)
     }
 
+    override func deleteForward(_ sender: Any?) {
+        if selectedRanges.count > 1, !hasMarkedText() {
+            let ns = string as NSString
+            replaceSelections(with: "", ranges: selectedRanges.map(\.rangeValue).map { r in
+                r.length > 0 || r.location >= ns.length ? r : ns.rangeOfComposedCharacterSequence(at: r.location)
+            })
+            return
+        }
+        super.deleteForward(sender)
+    }
+
+    private func replaceSelections(with replacement: String, ranges: [NSRange]? = nil) {
+        let ranges = (ranges ?? selectedRanges.map(\.rangeValue)).sorted { $0.location < $1.location }
+        var edits: [NSRange] = []
+        for r in ranges {
+            if let last = edits.last, NSMaxRange(last) > r.location {
+                edits[edits.count - 1] = NSUnionRange(last, r)
+            } else if edits.last != r { edits.append(r) }
+        }
+        guard shouldChangeText(inRanges: edits.map { NSValue(range: $0) }, replacementStrings: edits.map { _ in replacement }) else { return }
+        textStorage?.beginEditing()
+        for r in edits.reversed() { textStorage?.replaceCharacters(in: r, with: replacement) }
+        textStorage?.endEditing()
+        didChangeText()
+        var delta = 0
+        let newRanges = edits.map { r -> NSValue in
+            let length = (replacement as NSString).length
+            let caret = r.location + delta + length
+            delta += length - r.length
+            return NSValue(range: NSRange(location: caret, length: 0))
+        }
+        setSelectedRanges(newRanges, affinity: .downstream, stillSelecting: false)
+    }
+
     /// Return keeps the indent, adds a level after `{ [ (`, and puts a closer that follows on its own line.
     override func insertNewline(_ sender: Any?) {
-        guard !hasMarkedText(), let lang = buffer?.language else { super.insertNewline(sender); return }
-        apply(AutoPair.newline(in: string as NSString, selection: selectedRange(), language: lang))
+        if selectedRanges.count > 1, !hasMarkedText() { replaceSelections(with: "\n"); return }
+        guard selectedRanges.count == 1, !hasMarkedText(), let lang = buffer?.language else { super.insertNewline(sender); return }
+        if lang == .markdown {
+            let r = selectedRange(), ns = string as NSString
+            let line = ns.lineRange(for: NSRange(location: r.location, length: 0))
+            let head = ns.substring(with: NSRange(location: line.location, length: r.location - line.location))
+            if let continuation = MarkdownEditing.continuation(head) {
+                if continuation.isEmpty {
+                    edit(NSRange(location: line.location, length: NSMaxRange(r) - line.location), "", select: NSRange(location: line.location, length: 0))
+                } else { edit(r, "\n" + continuation, select: NSRange(location: r.location + 1 + (continuation as NSString).length, length: 0)) }
+                return
+            }
+        }
+        apply(AutoPair.newline(in: string as NSString, selection: selectedRange(), language: lang, indentUnit: indentUnit))
     }
 
     override func setSelectedRanges(_ ranges: [NSValue], affinity: NSSelectionAffinity, stillSelecting: Bool) {
+        settingRanges = true
         super.setSelectedRanges(ranges, affinity: affinity, stillSelecting: stillSelecting)
+        multipleRanges = ranges.count > 1 ? ranges : nil
+        settingRanges = false
         needsDisplay = true  // move the current-line highlight
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        guard window?.firstResponder === self, let window, let ranges = multipleRanges else { return }
+        insertionPointColor.setFill()
+        for range in ranges.map(\.rangeValue) where range.length == 0 && range != super.selectedRange() {
+            let screen = firstRect(forCharacterRange: range, actualRange: nil)
+            var caret = convert(window.convertFromScreen(screen), from: nil)
+            caret.size.width = 1
+            if caret.intersects(dirtyRect) { caret.fill() }
+        }
     }
 
     /// Current-line highlight.
@@ -450,7 +645,7 @@ final class LineNumberRuler: NSRulerView {
 
     @objc private func redraw() { needsDisplay = true }
 
-    @objc private func textChanged() {
+    @objc func textChanged() {
         let digits = max(3, String(lines().lineCount).count)
         let width = CGFloat(digits) * ("8" as NSString).size(withAttributes: [.font: Theme.gutterFont]).width + 20
         if abs(ruleThickness - width) > 0.5 { ruleThickness = width }
@@ -458,8 +653,10 @@ final class LineNumberRuler: NSRulerView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        NSColor.textBackgroundColor.setFill()
+        (textView?.backgroundColor ?? .textBackgroundColor).setFill()
         bounds.fill()
+        NSColor.separatorColor.withAlphaComponent(0.4).setFill()
+        NSRect(x: bounds.maxX - 1, y: bounds.minY, width: 1, height: bounds.height).fill()
         drawHashMarksAndLabels(in: dirtyRect)
     }
 
@@ -475,7 +672,7 @@ final class LineNumberRuler: NSRulerView {
         func draw(_ n: Int, _ frag: NSRect) {
             let attrs: [NSAttributedString.Key: Any] = [
                 .font: Theme.gutterFont,
-                .foregroundColor: n == caretLine ? NSColor.secondaryLabelColor : NSColor.tertiaryLabelColor,
+                .foregroundColor: n == caretLine ? NSColor.labelColor : NSColor.secondaryLabelColor,
             ]
             let label = "\(n)" as NSString
             let size = label.size(withAttributes: attrs)

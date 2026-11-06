@@ -10,8 +10,8 @@
 - [x] v0.4 version/changelog/README refresh; plan added to version control
 
 ## Not done
-- [ ] Quick Open ⌘P: fuzzy file finder over the workspace (reuse FileSearch's walker + excludes; share the matcher with the tree filter)
-- [ ] Settings window (SwiftUI `Settings` scene): font family/size, tab width, spaces vs tabs, wrap default, theme
+- [x] Quick Open ⌘P: shared FileSearch walker/excludes, index and FuzzyMatcher; keyboard navigation
+- [x] SwiftUI Settings scene: font family/size, tab width, spaces/tabs, wrap default, theme, LSP command
 - [ ] Release signing with Developer ID + notarization + DMG
-- [ ] Reopen recent folders/files menu (NSDocumentController recent items)
-- [ ] Crash-free check under large files (10MB log, 50K-node JSON) and performance fixes from 02/07
+- [x] Reopen recent folders/files via NSDocumentController recent items
+- [x] Release-mode regression checks: 10MB log indexing/edit and 50K-object JSON parse/tree construction

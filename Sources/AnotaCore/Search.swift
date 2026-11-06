@@ -83,6 +83,47 @@ public struct SearchReport: Sendable {
 public enum FileSearch {
     public static let defaultExcludes = [".git", "node_modules", ".build", "build", "dist", ".DS_Store", "*.min.js"]
 
+    public static func relativePath(_ url: URL, root: URL) -> String {
+        let path = physicalPath(url)
+        let base = physicalPath(root)
+        guard path.hasPrefix(base + "/") else { return url.lastPathComponent }
+        return String(path.dropFirst(base.count + 1))
+    }
+
+    public static func canonicalURL(_ url: URL) -> URL { URL(filePath: physicalPath(url)) }
+
+    private static func physicalPath(_ url: URL) -> String {
+        if let resolved = realpath(url.path, nil) {
+            defer { free(resolved) }
+            return String(cString: resolved)
+        }
+        let parent = url.deletingLastPathComponent()
+        guard parent.path != url.path else { return url.path }
+        return (physicalPath(parent) as NSString).appendingPathComponent(url.lastPathComponent)
+    }
+
+    /// Shared workspace walker. Never follows symlinks; callers can stop without scanning the rest.
+    public static func walk(root: URL, exclude: [String] = [], visit: (URL, URLResourceValues) throws -> Bool) rethrows {
+        let root = URL(filePath: physicalPath(root))
+        guard let e = FileManager.default.enumerator(at: root, includingPropertiesForKeys: [.isDirectoryKey, .fileSizeKey, .isSymbolicLinkKey]) else { return }
+        while let url = e.nextObject() as? URL {
+            if Task.isCancelled { return }
+            guard let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .fileSizeKey, .isSymbolicLinkKey]) else { continue }
+            let rel = relativePath(url, root: root)
+            if values.isSymbolicLink == true || matchesGlob(rel, exclude + defaultExcludes) {
+                e.skipDescendants(); continue
+            }
+            guard physicalPath(url).hasPrefix(root.path + "/"), values.isDirectory != true else { continue }
+            if try !visit(url, values) { return }
+        }
+    }
+
+    public static func files(root: URL, limit: Int = 100_000) -> [URL] {
+        var files: [URL] = []
+        walk(root: root) { url, _ in files.append(url); return files.count < limit }
+        return files.sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
+    }
+
     public static func matches(in text: String, _ re: NSRegularExpression, limit: Int = 10_000) -> [LineMatch] {
         scan(text, re, limit: limit).matches
     }
@@ -139,30 +180,22 @@ public enum FileSearch {
 
     public static func report(root: URL, options: SearchOptions, include: [String], exclude: [String], limit: Int = 5000) async throws -> SearchReport {
         let re = try options.compile()
-        let excludes = exclude + defaultExcludes
         let worker = Task.detached { () throws -> SearchReport in
             var truncated = false
             var results: [FileMatches] = [], remaining = max(0, limit)
-            let fm = FileManager.default
-            let root = root.resolvingSymlinksInPath().standardizedFileURL
-            guard let e = fm.enumerator(at: root, includingPropertiesForKeys: [.isDirectoryKey, .fileSizeKey, .isSymbolicLinkKey]) else { return SearchReport(files: [], truncated: false) }
             let deadline = Date().addingTimeInterval(5)
-            while remaining > 0, let url = e.nextObject() as? URL {
+            try walk(root: root, exclude: exclude) { url, values in
                 try Task.checkCancellation()
-                if Date() > deadline { truncated = true; break }
-                let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .fileSizeKey, .isSymbolicLinkKey])
-                let rel = String(url.path.dropFirst(root.path.count + 1))
-                if values?.isSymbolicLink == true || matchesGlob(rel, excludes) {
-                    e.skipDescendants(); continue
-                }
-                guard url.resolvingSymlinksInPath().path.hasPrefix(root.path + "/"), values?.isDirectory != true,
-                      (values?.fileSize ?? 0) < 5_000_000, include.isEmpty || matchesGlob(rel, include),
-                      let file = try? TextFile.read(url) else { continue }
+                guard remaining > 0, Date() < deadline else { truncated = true; return false }
+                guard (values.fileSize ?? 0) < 5_000_000, include.isEmpty || matchesGlob(relativePath(url, root: root), include),
+                      let file = try? TextFile.read(url) else { return true }
                 let scanned = scan(file.text, re, limit: remaining)
                 truncated = truncated || scanned.truncated
                 let found = scanned.matches
                 if !found.isEmpty { results.append(FileMatches(url: url, matches: found, text: file.text)); remaining -= found.count }
+                return true
             }
+            try Task.checkCancellation()
             return SearchReport(files: results.sorted { $0.url.path.localizedStandardCompare($1.url.path) == .orderedAscending }, truncated: truncated || remaining == 0)
         }
         return try await withTaskCancellationHandler { try await worker.value } onCancel: { worker.cancel() }

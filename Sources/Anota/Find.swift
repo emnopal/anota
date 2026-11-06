@@ -154,7 +154,8 @@ struct FindBar: View {
                 }
                 .buttonStyle(.plain)
                 .help("Toggle Replace")
-                TextField("Find", text: $find.options.query)
+                TextField("Find", text: $find.options.query, axis: .vertical)
+                    .lineLimit(1...5)
                     .textFieldStyle(.roundedBorder)
                     .frame(width: 220)
                     .focused($focused)
@@ -169,7 +170,8 @@ struct FindBar: View {
             if find.showReplace {
                 HStack(spacing: 6) {
                     Spacer().frame(width: 16)
-                    TextField("Replace", text: $find.replacement)
+                    TextField("Replace", text: $find.replacement, axis: .vertical)
+                    .lineLimit(1...5)
                         .textFieldStyle(.roundedBorder)
                         .frame(width: 220)
                         .onSubmit { find.replaceCurrent() }
@@ -336,12 +338,14 @@ struct SearchPanel: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
-                TextField("Search", text: $search.options.query)
+                TextField("Search", text: $search.options.query, axis: .vertical)
+                    .lineLimit(1...5)
                     .focused($focused)
                 OptionToggles(options: $search.options)
             }
             HStack {
-                TextField("Replace", text: $search.replacement)
+                TextField("Replace", text: $search.replacement, axis: .vertical)
+                    .lineLimit(1...5)
                 Toggle("AB", isOn: $search.options.preserveCase).help("Preserve Case")
                 Button { search.replaceAll(in: ws) } label: { Image(systemName: "text.badge.checkmark") }
                     .help("Replace All")

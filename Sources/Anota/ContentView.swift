@@ -17,6 +17,8 @@ struct ContentView: View {
                 StatusBar(ws: ws).id(ws.active?.id)
             }
         }
+        .preferredColorScheme(["Dark", "Midnight"].contains(EditorSettings.shared.theme) ? .dark : ["Light", "Solarized"].contains(EditorSettings.shared.theme) ? .light : nil)
+        .sheet(item: $ws.palette) { mode in PaletteView(ws: ws, mode: mode) }
         .navigationTitle(ws.active?.name ?? "Anota")
         .navigationSubtitle(subtitle)
         .toolbar {
@@ -129,10 +131,25 @@ struct Sidebar: View {
     }
 
     private var files: some View {
+        VStack(spacing: 4) {
+        TextField("Filter files", text: $ws.treeFilter).textFieldStyle(.roundedBorder).padding(.horizontal, 10)
         List(selection: $ws.treeSelection) {
             if let tree = ws.tree {
-                Section(tree.url.lastPathComponent) {
-                    ForEach(tree.children ?? []) { FileRow(node: $0) }
+                Section {
+
+                    if ws.treeFilter.isEmpty {
+                        ForEach(tree.children ?? []) { FileRow(ws: ws, node: $0) }
+                    } else {
+                        ForEach(ws.filteredFiles, id: \.self) { url in
+                            Button { ws.open(url) } label: { Text(FileSearch.relativePath(url, root: tree.url)).lineLimit(1) }.buttonStyle(.plain)
+                        }
+                    }
+                } header: {
+                    HStack {
+                        Text(tree.url.lastPathComponent)
+                        Spacer()
+                        Menu { FileContextMenu(ws: ws, url: tree.url) } label: { Image(systemName: "ellipsis") }.menuStyle(.borderlessButton)
+                    }
                 }
             }
         }
@@ -145,6 +162,7 @@ struct Sidebar: View {
                 }
             }
         }
+        }
         // Selection is only a highlight that follows the active tab (set in ContentView). Rows open files
         // on click themselves: driving opens from selection changes let the list write back an old
         // selection and re-open that file, so a tab outside the folder couldn't be selected.
@@ -152,39 +170,63 @@ struct Sidebar: View {
 }
 
 struct FileRow: View {
+    @Bindable var ws: Workspace
     @Bindable var node: FileNode
+    @FocusState private var renameFocused: Bool
 
     var body: some View {
         if node.isDirectory {
             DisclosureGroup(isExpanded: $node.expanded) {
                 if let kids = node.children {
-                    ForEach(kids) { FileRow(node: $0) }
+                    ForEach(kids) { FileRow(ws: ws, node: $0) }
                 } else {
                     ProgressView().controlSize(.small)
                 }
             } label: {
-                Label(node.url.lastPathComponent, systemImage: "folder")
+                rowLabel("folder")
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .contentShape(Rectangle())
-                    .onTapGesture { node.expanded.toggle() }  // the name toggles too, not only the chevron
+                    .onTapGesture { if ws.renaming != node.url { node.expanded.toggle() } }  // the name toggles too, not only the chevron
             }
             .tag(node.url)
+            .contextMenu { FileContextMenu(ws: ws, url: node.url) }
             .onChange(of: node.expanded) { _, open in if open && node.children == nil { node.load() } }
         } else {
-            Label(node.url.lastPathComponent, systemImage: Language.detect(node.url).symbol)
+            rowLabel(Language.detect(node.url).symbol)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .contentShape(Rectangle())
-                .onTapGesture { Workspace.shared.open(node.url) }
+                .onTapGesture { if ws.renaming != node.url { ws.open(node.url) } }
                 .tag(node.url)
-                .contextMenu { FileContextMenu(url: node.url) }
+                .contextMenu { FileContextMenu(ws: ws, url: node.url) }
                 .onDrag { NSItemProvider(object: node.url as NSURL) }
         }
     }
+    @ViewBuilder private func rowLabel(_ symbol: String) -> some View {
+        if ws.renaming == node.url {
+            TextField("Name", text: $ws.renameText)
+                .focused($renameFocused)
+                .onAppear { renameFocused = true }
+                .onSubmit { ws.renameItem(node.url) }
+                .onExitCommand { ws.renaming = nil }
+        } else { Label(node.url.lastPathComponent, systemImage: symbol) }
+    }
+
 }
 
 struct FileContextMenu: View {
+    var ws: Workspace? = nil
     let url: URL
     var body: some View {
+        if let ws {
+            let directory = (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+            if directory {
+                Button("New File") { ws.createItem(in: url, folder: false) }
+                Button("New Folder") { ws.createItem(in: url, folder: true) }
+            }
+            Button("Rename…") { ws.renaming = url; ws.renameText = url.lastPathComponent }.disabled(url == ws.root)
+            Button("Move to Trash", role: .destructive) { ws.trashItem(url) }.disabled(url == ws.root)
+            Divider()
+        }
         Button("Reveal in Finder") { NSWorkspace.shared.activateFileViewerSelecting([url]) }
         Button("Copy Path") {
             NSPasteboard.general.clearContents()
@@ -364,6 +406,7 @@ struct TabItem: View {
             Image(systemName: buffer.language.symbol)
                 .font(.system(size: 10))
                 .foregroundStyle(.secondary)
+            if buffer.pinned { Image(systemName: "pin.fill").font(.system(size: 10)) }
             Text(buffer.name).lineLimit(1)
             CloseOrDirty(dirty: buffer.isDirty, visible: hover || active, action: close)
         }
@@ -414,6 +457,8 @@ struct TabContextMenu: View {
 
     var body: some View {
         Button("Close") { ws.close(buffer, in: group) }
+        Button(buffer.pinned ? "Unpin Tab" : "Pin Tab") { ws.togglePin(buffer, in: group) }
+        Button("Close Saved") { ws.closeSaved(in: group) }
         Button("Close Others") { ws.closeOthers(buffer, in: group) }
         Button("Close Tabs to the Left") { ws.closeTabs(to: .left, of: buffer, in: group) }
             .disabled(group.tabs.first === buffer)
@@ -520,7 +565,7 @@ extension GroupView {
 
 extension GroupView {
     fileprivate func editor(_ b: Buffer) -> some View {
-        EditorView(buffer: b, wrap: ws.wrap, reveal: b.reveal, isActive: { group.active === b && ws.focusedGroup === group }) { ws.focusedID = group.id; ws.find.highlight() }
+        EditorView(buffer: b, wrap: ws.wrap, reveal: b.reveal, syncFraction: b.syncScroll, isActive: { group.active === b && ws.focusedGroup === group }) { ws.focusedID = group.id; ws.find.highlight() }
             .frame(minWidth: 200)
     }
 }
@@ -587,7 +632,7 @@ struct EmptyEditor: View {
 
 struct StatusBar: View {
     let ws: Workspace
-    private static let encodings: [String.Encoding] = [.utf8, .utf16, .isoLatin1, .windowsCP1252, .macOSRoman, .shiftJIS]
+    private static let encodings: [String.Encoding] = [.utf8, .utf16, .utf16LittleEndian, .utf16BigEndian, .isoLatin1, .windowsCP1252, .macOSRoman, .shiftJIS]
 
     var body: some View {
         HStack(spacing: 16) {
@@ -597,6 +642,14 @@ struct StatusBar: View {
                     Text(m).lineLimit(1).truncationMode(.tail).help(m)
                 }
                 Spacer()
+                Menu(b.indentUnit == "\t" ? "Tabs" : "Spaces: \(b.indentUnit.count)") {
+                    Button("Use Settings Default") { b.indentOverride = nil }
+                    Button("Detect from File") { b.indentOverride = Indentation.detect(b.text) }
+                    Button("Tabs") { b.indentOverride = "\t" }
+                    ForEach([2, 4, 8], id: \.self) { width in
+                        Button("\(width) Spaces") { b.indentOverride = String(repeating: " ", count: width) }
+                    }
+                }.fixedSize()
                 Menu(b.lineEnding.label) {
                     ForEach(LineEnding.allCases, id: \.self) { le in
                         Button(le.label) { b.lineEnding = le; b.markEdited() }
@@ -604,6 +657,13 @@ struct StatusBar: View {
                 }
                 .fixedSize()
                 Menu(String.localizedName(of: b.encoding)) {
+                    Menu("Reopen with Encoding") {
+                        ForEach(Self.encodings, id: \.rawValue) { e in
+                            Button(String.localizedName(of: e)) { ws.reopen(b, encoding: e) }
+                        }
+                    }
+                    Divider()
+                    Text("Save with Encoding")
                     ForEach(Self.encodings, id: \.rawValue) { e in
                         Button(String.localizedName(of: e)) { b.encoding = e; b.markEdited() }
                     }

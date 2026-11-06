@@ -15,9 +15,9 @@ Code: mostly `ContentView.swift`, `Theme` in `EditorView.swift`, `FindBar` in `F
 
 ## Not done
 - [ ] Visual review pass + fixes (spacing, tab bar height, gutter colours, dark mode check)
-- [ ] Themes beyond system light/dark; user-chosen editor font/size (see 10)
+- [x] System/Light/Dark/Solarized/Midnight themes; editor font family and size in Settings
 - [ ] VoiceOver audit (labels exist on close buttons; tree/tabs not audited); Reduce Motion
-- [ ] Command palette ⇧⌘P (moved to 11)
+- [x] Command palette ⇧⌘P
 
 ## v0.4 verification update
 Native UI checks covered mixed nested splits and tab selection after pane closure. Hosted-view tests cover actual

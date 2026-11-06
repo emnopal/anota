@@ -20,7 +20,7 @@ let package = Package(
                 .product(name: "SwiftTreeSitter", package: "swift-tree-sitter"),
                 "TreeSitterGrammars",
             ],
-            resources: [.copy("Queries")]  // highlights.scm per grammar
+            resources: [.copy("Queries"), .copy("Resources")]  // highlights.scm per grammar
         ),
         // Generated C for every tree-sitter grammar we highlight (see Vendor/TreeSitterGrammars/README.md).
         .target(

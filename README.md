@@ -5,7 +5,11 @@
 A simple, fast code editor for macOS.
 Written in Swift (SwiftUI + AppKit).
 
-> Status: **v0.4**. Core features work and are unit-tested. See [`.changelog`](.changelog).
+> Status: **v0.5**. Core features work and are unit-tested. See [`.changelog`](.changelog).
+
+[![Anota — code, notes and data in one native macOS workspace](assets/showcase/hero.png)](showcase.md)
+
+[Explore the screenshot showcase →](showcase.md)
 
 ## Features
 
@@ -129,10 +133,11 @@ VS Code shortcuts (macOS bindings):
 | Next / previous tab | ⌃⇥ / ⌃⇧⇥, ⌥⌘→ / ⌥⌘← |
 | Focus editor group 1–3 (one past the last splits) | ⌘1 / ⌘2 / ⌘3 |
 | Reopen closed tab | ⇧⌘T |
-| Toggle sidebar / show Explorer | ⌘B / ⇧⌘E |
+| Toggle sidebar / show Explorer | ⌃⌘B / ⇧⌘E |
 | Find in files, format, replace, word wrap, split | ⇧⌘F, ⌥⇧F, ⌥⌘F, ⌥Z, ⌘\\ (as above) |
 
-Not yet: Quick Open (⌘P), Command Palette (⇧⌘P), multi-cursor, and two-key chords (⌘K …).
+Quick Open: ⌘P. Command palette: ⇧⌘P. New Window: ⇧⌘N. Settings: ⌘,.
+Markdown: ⌘B bold, ⌘I italic; Return continues lists. Multiple selections: ⌘D adds the next occurrence, ⌥⌘↑/↓ adds a cursor above/below; Option-drag uses native column selection. Two-key chords (⌘K …) remain unimplemented.
 
 ## Project layout
 
@@ -172,12 +177,12 @@ Don't edit `Vendor/` or `Sources/AnotaCore/Queries/` by hand. Change `scripts/ve
 
 ## Versioning & releases
 
-- `.version` holds the version (`0.4`). It sets the app's version; the build number is the commit count.
+- `.version` holds the version (`0.5`). It sets the app's version; the build number is the commit count.
 - `.changelog` has a `## v<version>` section per release; that section becomes the release notes.
 - CI (`.github/workflows/ci.yml`) runs `swift test` and `scripts/make-app.sh` on every push and pull request.
   When both pass on `main`, it publishes a GitHub release with the zipped app:
   - `.version` changed (no `v<version>` tag yet) → release **`v<version>`**
-  - `.version` unchanged → pre-release **`v<version>-rc-<UTC YYYYMMDDHHMMSS>`**, e.g. `v0.4-rc-20261030101010`
+  - `.version` unchanged → pre-release **`v<version>-rc-<UTC YYYYMMDDHHMMSS>`**, e.g. `v0.5-rc-20261106101010`
 - To release a new version: bump `.version`, add its section to `.changelog`, push to `main`.
 
 ## Data & privacy
@@ -195,7 +200,7 @@ Don't edit `Vendor/` or `Sources/AnotaCore/Queries/` by hand. Change `scripts/ve
   file-drop delivery still need manual verification; automated tests cover layout, drag logic and file URL transfer.
 
 - One window per app
-- No LSP, git integration or terminal
+- Configurable initial LSP support (completion, definition, diagnostic tooltips); no git integration or terminal
 - Very large files (several MB): colours of the edited line update after a short pause in typing
 - YAML / TOML / INI trees are view-only. Only JSON values can be edited in the tree
 - Data viewer: SQLite and Excel are read-only; grid cells can't be edited; files load fully into memory
@@ -205,3 +210,13 @@ Don't edit `Vendor/` or `Sources/AnotaCore/Queries/` by hand. Change `scripts/ve
 ## Third-party licenses
 
 The vendored tree-sitter grammars are MIT-licensed; see `Vendor/TreeSitterGrammars/LICENSES/`.
+
+### Editor/workspace settings and release packaging
+
+Settings provides font family/size, tabs/spaces and width, wrapping defaults, System/Light/Dark/Solarized/Midnight themes, and an optional LSP executable command. Use **Restart Language Server** in ⇧⌘P after configuring the server (for example `sourcekit-lsp`, `typescript-language-server --stdio`, or `pylsp`). Servers must already be installed. Completion uses the standard Escape completion action; go to definition is in the command palette. The initial client uses UTF-16 positions and full-document updates below two million characters, without snippets, server installation, or workspace edits.
+
+Tabs can be pinned; bulk close commands preserve pinned tabs. Close Saved preserves unsaved tabs. The file tree supports recursive live refresh, fuzzy filtering, create/inline rename, and Move to Trash. Dirty files must be saved/closed before their directory can be trashed. View mode and editor/preview scrolling are recovered per document.
+
+Markdown export is in File; fenced code highlighting uses bundled highlight.js 11.11.1 (license included), with no network fetches. Preview document JavaScript stays disabled. PDF export is a continuous document page; HTML images retain their relative paths. Scroll sync uses proportional positions, rather than source-line anchors.
+
+Build/package: `sh scripts/make-app.sh release`, then `sh scripts/make-dmg.sh`. The local build is ad-hoc signed. For a distributable release, set `SIGNING_IDENTITY` to a Developer ID Application identity and `NOTARY_PROFILE` to an existing notarytool Keychain profile, then run `sh scripts/notarize.sh`. This signs with hardened runtime, notarizes/staples the app and DMG, and verifies the result.

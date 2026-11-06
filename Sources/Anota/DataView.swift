@@ -21,7 +21,7 @@ struct DataView: View {
             footer
         }
         .background(Color(nsColor: .textBackgroundColor))
-        .task(id: buffer.revision) { await model.load(buffer) }
+        .task(id: buffer.revision) { model.workspace = ws; await model.load(buffer) }
         .onDisappear { model.cancel() }
     }
 
@@ -308,6 +308,7 @@ private struct RawRecord: View {
 
 @Observable
 final class DataModel {
+    weak var workspace: Workspace?
     struct Source {
         let name: String
         var table: DataTable?  // nil for a SQLite object until it's queried
@@ -543,7 +544,7 @@ final class DataModel {
         guard panel.runModal() == .OK, let url = panel.url else { return }
         do {
             let count = try export(format, to: url)
-            Workspace.shared.flash("Exported \(count.formatted()) rows to \(url.lastPathComponent)")
+            workspace?.flash("Exported \(count.formatted()) rows to \(url.lastPathComponent)")
         } catch {
             self.error = "Export failed: \(error.localizedDescription)"
         }

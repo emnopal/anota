@@ -28,4 +28,4 @@ Code: `Sources/AnotaCore/Search.swift`, `Sources/Anota/Find.swift`, menu items i
 - [ ] Respect `.gitignore`
 - [ ] Replace in a single file / dismiss a single result from the results list
 - [ ] Search history in the fields
-- [ ] Multi-line search input
+- [x] Multi-line find/replace and project search input (vertical fields, up to five visible lines)

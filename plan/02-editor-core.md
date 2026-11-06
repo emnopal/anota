@@ -26,16 +26,16 @@ Code: `Sources/Anota/EditorView.swift`, `Sources/Anota/Workspace.swift` (Buffer)
 - Multi-MB files: an incremental re-parse still costs ~0.1 s, so colours update ~0.25 s after typing pauses.
   The first open of a 5 MB file parses ~0.7 s in the background (text shows uncoloured meanwhile).
 - `LineIndex` is rebuilt per edit (one ~4 ms scan per 5 MB); incremental update if it ever shows up in profiles.
-- Encoding picker changes the **save** encoding only (no "reopen with encoding").
+- Encoding menu separates save encoding and Reopen with Encoding.
 - Dirty flag stays set after undoing back to the saved state. UTF-8 BOM isn't written back.
 
 ## Not done
-- [ ] Matching-bracket highlight
-- [ ] Indentation settings: tabs vs spaces, width, Tab key inserting spaces, detect from file
-- [ ] Reopen with encoding
+- [x] Matching-bracket highlight (bounded scan, mixed nesting)
+- [x] Indentation settings: tabs/spaces, width, Tab insertion, file detection and status-bar override
+- [x] Reopen with encoding (with discard/cancel guard for dirty buffers)
 - [ ] "Compare" button in the conflict banner (diff disk vs mine)
-- [ ] Multi-cursor (see 14-vscode-shortcuts.md, to consider later)
-- [ ] Font family/size setting (see 10)
+- [x] Multi-cursor: native selections, Cmd-D, add cursor above/below, typing/deletion/newline and undo
+- [x] Font family/size setting (see 10)
 
 ## Verify
 `swift test` covers highlighter/TextFile. Manual: open CRLF + Latin-1 files, edit, save, `xxd` the result.

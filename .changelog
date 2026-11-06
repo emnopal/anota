@@ -3,6 +3,37 @@
 Newest first. Each release's notes are the section whose heading matches `.version`.
 A push to `main` that doesn't change `.version` is published as a pre-release `v<version>-rc-<UTC datetime>`.
 
+## v0.5
+
+Independent windows, a more capable editor, and a complete Markdown workflow.
+
+- Each window has its own workspace and recovery session. Finder Open With reuses the most recently active
+  window, or creates one when needed, without leaving an extra empty window.
+- Added Settings for font family/size, indentation width, spaces versus tabs, wrap defaults and five themes:
+  System, Light, Dark, Solarized and Midnight.
+- Added matching-bracket highlighting, document indentation overrides and explicit Reopen with Encoding.
+- Multiple cursors support successive typing, deletion, newline and undo; use ⌘D or add cursors above/below.
+- Pin tabs and use Close Saved to keep unsaved work and pinned documents open.
+- Files refresh after disk changes; dirty buffers retain conflict handling. Recursive watcher startup runs
+  off the main thread to avoid blocking workspace restoration.
+- Create files/folders, rename inline and Move to Trash from the directory tree; unsaved changes block Trash.
+- Quick Open (⌘P), the tree filter and command palette (⇧⌘P) share fuzzy matching. Workspace indexing reuses
+  file-search exclusions, and relative paths resolve correctly through macOS temporary-directory aliases.
+- Persist document view modes, scroll positions, pinned state and explicit read encodings across sessions.
+- Markdown adds proportional editor/preview scroll sync, task checkboxes, locally bundled code-block
+  highlighting, HTML/PDF export, bold/italic shortcuts and list continuation on Return.
+- Find, replace and project-search inputs support multiple lines. Added recent files/folders through macOS.
+- Added a configurable stdio language-server client for completion, go to definition and diagnostics.
+- Fixed multiple selections disappearing during successive typing, line beginnings clipped by the ruler,
+  and preview scroll-only changes not reaching WebKit.
+- Added a screenshot showcase and a new README hero using the demo workspace.
+- Added local DMG packaging and Developer ID/notarization scripts; signing/notarization execution remains skipped.
+
+Verification: 42 app tests and 90 core tests passed in release mode, with the performance benchmark and real
+SourceKit-LSP completion enabled. Separate-process crash recovery passed. Native Finder Open With was verified
+with one, two and no existing workspace windows. Native file drops to Finder and Option-drag column selection
+still need human verification; see plan/FEATURE-PASS.md.
+
 ## v0.4
 
 Four-direction workspaces, drag-and-drop improvements, and audit fixes.

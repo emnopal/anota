@@ -1,5 +1,7 @@
 # What's changed so far (2026-11-05)
 
+- Finder Open With uses SwiftUI scene reuse to open in the most recently active workspace window, or creates one when none is available. Removed the competing app-delegate handler that caused an extra empty window. Verified through Finder with one, two and no existing workspace windows.
+
 Status: ✅ **Done** · 🟡 **Partially done** (works; gaps listed in the area file) · ⬜ **Not done**
 
 ## Session 1: plan
@@ -119,3 +121,15 @@ Status: ✅ **Done** · 🟡 **Partially done** (works; gaps listed in the area 
 - ✅ Native UI: mixed nested splits and selecting the surviving tab after pane closure.
 - 🟡 Native pointer smoothness and file-drop delivery remain unverified due to CUA `noWindowsAvailable` errors.
 - ✅ `.version` → 0.4, release notes and README updated; plan now version-controlled. Publication not performed.
+
+## 2026-11-06 — requested editor/workspace feature pass
+
+Implemented independent windows/recovery, Settings/themes/font/indentation, matching brackets, reopen encoding, multiple selections, pin/Close Saved, FSEvents, tree file management/filter, Quick Open/command palette, view/scroll persistence, Markdown sync/highlighting/tasks/export/helpers, multiline search and recent files. Added a configurable LSP client and release DMG/sign/notarize scripts. See `FEATURE-PASS.md` for validation and remaining environment-dependent checks.
+
+
+## 2026-11-06 — v0.5 prepared
+
+- Updated `.version` and README status to 0.5; added release notes for the completed editor/workspace feature pass.
+- Refreshed the screenshot showcase and README hero.
+- Release validation: 42 app tests and 90 core tests, enabled benchmark and real SourceKit-LSP; native Finder Open With passed with one, two and no existing windows.
+- Developer ID signing/notarization skipped; no push or publication performed.

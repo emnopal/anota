@@ -1,10 +1,10 @@
 # 11 · Later (v1.1+) and non-goals for v1 — 🚫
 
 Deliberately not in v1 (from the original plan). Pick up only when asked.
-- [ ] Command palette (⇧⌘P)
-- [ ] Multi-cursor / column selection (NSTextView supports multiple selections natively)
-- [ ] Multi-window (each window its own Workspace; see 01)
-- [ ] LSP: completion, go to definition, diagnostics
+- [x] Command palette (⇧⌘P)
+- [x] Multi-cursor / native column selection (Cmd-D, add cursors, multi-selection edits/undo)
+- [x] Multi-window (each window its own Workspace and recovery entry; see 01)
+- [x] Initial LSP client: completion, go to definition, diagnostics; user-configured server command per workspace
 - [ ] Git integration (status in tree, gutter diff, blame)
 - [ ] Integrated terminal
 - [ ] Extensions / plugins

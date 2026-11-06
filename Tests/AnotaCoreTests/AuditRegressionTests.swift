@@ -63,7 +63,7 @@ private func fixture(_ name: String) -> URL {
     let html = MarkdownHTML.page("<script>alert(1)</script>\n\n```html\n<b>& test</b>\n```\n\n[x](javascript:alert(1))")
     #expect(!html.contains("<script>"))
     #expect(!html.contains("href=\"javascript:"))
-    #expect(html.contains("&lt;b&gt;&amp; test&lt;/b&gt;"))
+    #expect(html.replacingOccurrences(of: #"<span[^>]*>|</span>"#, with: "", options: .regularExpression).contains("&lt;b&gt;&amp; test&lt;/b&gt;"))
     #expect(html.contains("Content-Security-Policy"))
 }
 

@@ -1,5 +1,6 @@
 import Foundation
 import Markdown
+import JavaScriptCore
 import TOMLKit
 import Yams
 
@@ -61,6 +62,10 @@ public enum MarkdownHTML {
         """
     }
 
+    public static var highlightingScript: String {
+        guard let url = Bundle.module.url(forResource: "highlight.min", withExtension: "js", subdirectory: "Resources") else { return "" }
+        return (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+    }
     static let css = """
     :root { color-scheme: light dark; --fg:#1f2328; --muted:#59636e; --border:#d1d9e0; --code:#f6f8fa; --link:#0969da; }
     @media (prefers-color-scheme: dark) { :root { --fg:#e6edf3; --muted:#9198a1; --border:#3d444d; --code:#1c2128; --link:#4493f8; } }
@@ -76,12 +81,20 @@ public enum MarkdownHTML {
     table { border-collapse: collapse; } th, td { border: 1px solid var(--border); padding: 6px 12px; }
     tr:nth-child(2n) { background: var(--code); }
     img { max-width: 100%; } hr { border: 0; border-top: 1px solid var(--border); margin: 2em 0; }
+    .hljs-keyword, .hljs-selector-tag, .hljs-literal { color: #cf5b9d; }
+    .hljs-string, .hljs-regexp { color: #c66b48; }
+    .hljs-number, .hljs-built_in, .hljs-type { color: #8b7cce; }
+    .hljs-title, .hljs-attr { color: #4697c7; }
+    .hljs-comment { color: var(--muted); font-style: italic; }
+    @media print { body { padding: 0; } pre { white-space: pre-wrap; overflow-wrap: anywhere; } }
     li > input[type=checkbox] { margin-right: .4em; }
+    li > input[type=checkbox] + p { display: inline; }
     """
 }
 
 private struct SafeMarkdown: MarkupWalker {
     var html = ""
+    var javascript: JSContext?
     static func escape(_ s: String) -> String {
         s.replacingOccurrences(of: "&", with: "&amp;").replacingOccurrences(of: "<", with: "&lt;").replacingOccurrences(of: ">", with: "&gt;").replacingOccurrences(of: "\"", with: "&quot;")
     }
@@ -106,11 +119,25 @@ private struct SafeMarkdown: MarkupWalker {
         default: tag = nil
         }
         if let tag { html += "<\(tag)>" }
+        if let item = markup as? ListItem, let checkbox = item.checkbox {
+            html += "<input type=\"checkbox\" disabled" + (checkbox == .checked ? " checked" : "") + ">"
+        }
         descendInto(markup)
         if let tag { html += "</\(tag)>" }
     }
     mutating func visitText(_ text: Text) { html += Self.escape(text.string) }
-    mutating func visitCodeBlock(_ code: CodeBlock) { html += "<pre><code>" + Self.escape(code.code) + "</code></pre>" }
+    mutating func visitCodeBlock(_ code: CodeBlock) {
+        if javascript == nil {
+            javascript = JSContext()
+            javascript?.evaluateScript(MarkdownHTML.highlightingScript)
+            javascript?.evaluateScript("function colorCode(code, language) { try { return language && hljs.getLanguage(language) ? hljs.highlight(code, {language:language, ignoreIllegals:true}).value : hljs.highlightAuto(code).value; } catch (_) { return null; } }")
+        }
+        let language = code.language?.split(separator: " ").first.map(String.init) ?? ""
+        // Bound expensive auto-detection for large pasted logs.
+        let highlighted = code.code.utf8.count < 200_000 ? javascript?.objectForKeyedSubscript("colorCode")?.call(withArguments: [code.code, language]) : nil
+        let content = highlighted?.isString == true ? highlighted!.toString()! : Self.escape(code.code)
+        html += "<pre><code class=\"hljs language-" + Self.escape(language) + "\">" + content + "</code></pre>"
+    }
     mutating func visitInlineCode(_ code: InlineCode) { html += "<code>" + Self.escape(code.code) + "</code>" }
     mutating func visitHTMLBlock(_ block: HTMLBlock) { html += Self.escape(block.rawHTML) }
     mutating func visitInlineHTML(_ inline: InlineHTML) { html += Self.escape(inline.rawHTML) }

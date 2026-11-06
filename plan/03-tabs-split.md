@@ -24,6 +24,6 @@ Code: `Sources/Anota/ContentView.swift`, `Workspace.swift`, `PaneLayoutView.swif
 
 ## Not done
 - [ ] Manual verification of edge dragging, cross-pane moves and directory-tree file drops
-- [ ] Pin tab
-- [ ] Close Saved
+- [x] Pin tab (persisted; protected from bulk close; explicit close still works)
+- [x] Close Saved (keeps dirty and pinned tabs)
 - [ ] Preview tab (temporary tab on tree single-click)

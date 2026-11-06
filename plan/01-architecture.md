@@ -10,7 +10,7 @@
   TS/C++/Rust/JS) and the python/js/yaml manifests drop their scanner (fileExists bug → link error).
   Details in 12-syntax-highlighting.md.
 - Formatting shells out to standard tools (prettier, gofmt, …) found on the login-shell PATH; see 13-formatting.md.
-- Single window, one global `Workspace.shared`.
+- Multiple windows, each with its own `Workspace`, session directory and focused menu routing.
 
 ## Layout (as built)
 ```
@@ -45,5 +45,5 @@ scripts/make-app.sh [debug]   builds build/Anota.app, ad-hoc signed
 - Session writes: buffer files first, then session.json (crash-safe ordering).
 
 ## Not done / limits
-- [ ] Multi-window (each window its own Workspace + session entry) — not done
+- [x] Multi-window: independent workspaces and recovery entries; prior single-window session migrates on first use
 - Git: repo initialised, nothing committed yet (user hasn't asked).

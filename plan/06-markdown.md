@@ -17,8 +17,8 @@ Code: `Sources/AnotaCore/Formats.swift` (`MarkdownHTML`), `Sources/Anota/Markdow
 - Local images rely on WKWebView allowing file access under the base URL; **not verified** visually.
 
 ## Not done
-- [ ] Scroll sync between editor and preview
-- [ ] Syntax highlighting inside fenced code blocks in the preview (bundle highlight.js locally, no network)
-- [ ] Task-list checkboxes rendering (check what HTMLFormatter emits)
-- [ ] Export to HTML / PDF
-- [ ] Markdown editing helpers (⌘B bold, ⌘I italic, list continuation on Return)
+- [x] Bidirectional proportional scroll sync between editor and preview
+- [x] Fenced code highlighting using bundled highlight.js 11.11.1 in JavaScriptCore; preview document JavaScript remains disabled
+- [x] Disabled checked/unchecked task-list inputs rendered from swift-markdown ListItem.checkbox (custom safe renderer)
+- [x] Export to HTML / PDF (PDF uses a continuous document page)
+- [x] Markdown helpers: ⌘B bold, ⌘I italic, ordered/unordered/task-list continuation and empty-item termination

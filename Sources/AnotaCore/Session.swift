@@ -11,11 +11,17 @@ public struct Session: Codable, Sendable, Equatable {
         public var language: Language
         public var selection: Int
         public var diskDate: Date?
+        public var viewMode: String?
+        public var scroll: Double?
+        public var previewScroll: Double?
+        public var pinned: Bool?
+        public var readEncoding: UInt?
 
         public init(id: UUID, path: String?, dirty: Bool, encoding: UInt, lineEnding: LineEnding,
-                    language: Language, selection: Int, diskDate: Date?) {
+                    language: Language, selection: Int, diskDate: Date?, viewMode: String? = nil, scroll: Double? = nil, previewScroll: Double? = nil, pinned: Bool? = nil, readEncoding: UInt? = nil) {
             self.id = id; self.path = path; self.dirty = dirty; self.encoding = encoding
             self.lineEnding = lineEnding; self.language = language; self.selection = selection; self.diskDate = diskDate
+            self.viewMode = viewMode; self.scroll = scroll; self.previewScroll = previewScroll; self.pinned = pinned; self.readEncoding = readEncoding
         }
     }
 

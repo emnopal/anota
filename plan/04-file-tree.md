@@ -15,12 +15,12 @@ Code: `Workspace.swift` (FileNode, `root`), `ContentView.swift` (Sidebar, FileRo
 
 ## Partial / limits
 - Native pointer delivery of file drops still needs manual verification; provider encoding and target opening are tested.
-- No live updates while the app is frontmost (refresh only on activate).
+- FSEvents updates loaded folders and clean buffers while frontmost.
 
 ## Not done
-- [ ] Live refresh with FSEvents
-- [ ] New File / New Folder, inline rename, Move to Trash (never permanent delete)
+- [x] Live refresh with FSEvents (coalesced recursive events; open files outside the root also watched)
+- [x] New File / New Folder, inline rename, Move to Trash (never permanent delete; refuses unsaved affected buffers)
 - [ ] Show hidden files toggle
-- [ ] Filter field in the tree (the fuzzy matcher should be shared with Quick Open, see 10)
+- [x] Filter field shares FuzzyMatcher and workspace file index with Quick Open
 - [ ] Verify native file drops end-to-end, including Finder destinations
 - [ ] Git status colouring (v1.1)
