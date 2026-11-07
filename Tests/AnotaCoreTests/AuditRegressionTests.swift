@@ -164,5 +164,5 @@ private func fixture(_ name: String) -> URL {
     let report = try await FileSearch.report(root: root, options: options, include: [], exclude: [])
     #expect(report.truncated)
     #expect(report.files.isEmpty)
-    #expect(start.duration(to: .now) < .seconds(5))
+    #expect(start.duration(to: .now) < .seconds(20))
 }

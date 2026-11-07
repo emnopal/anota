@@ -5,7 +5,7 @@
 A simple, fast code editor for macOS.
 Written in Swift (SwiftUI + AppKit).
 
-> Status: **v0.5**. Core features work and are unit-tested. See [`.changelog`](.changelog).
+> Status: **v0.5.1**. Core features work and are unit-tested. See [`changelog.md`](changelog.md).
 
 [![Anota — code, notes and data in one native macOS workspace](assets/showcase/hero.png)](showcase.md)
 
@@ -158,7 +158,7 @@ scripts/
   make-app.sh           build the .app bundle
   make-icon.swift       render assets/AppIcon.icns
   release-tag.sh        next release tag from .version
-  release-notes.sh      the .changelog section for .version
+  release-notes.sh      the changelog.md section for .version
 plan/                   feature status, remaining work and release history
 assets/                 app icon
 .github/workflows/      CI: test, build, release
@@ -178,12 +178,12 @@ Don't edit `Vendor/` or `Sources/AnotaCore/Queries/` by hand. Change `scripts/ve
 ## Versioning & releases
 
 - `.version` holds the version (`0.5`). It sets the app's version; the build number is the commit count.
-- `.changelog` has a `## v<version>` section per release; that section becomes the release notes.
+- `changelog.md` has a `## v<version>` section per release; that section becomes the release notes.
 - CI (`.github/workflows/ci.yml`) runs `swift test` and `scripts/make-app.sh` on every push and pull request.
   When both pass on `main`, it publishes a GitHub release with the zipped app:
   - `.version` changed (no `v<version>` tag yet) → release **`v<version>`**
   - `.version` unchanged → pre-release **`v<version>-rc-<UTC YYYYMMDDHHMMSS>`**, e.g. `v0.5-rc-20261106101010`
-- To release a new version: bump `.version`, add its section to `.changelog`, push to `main`.
+- To release a new version: bump `.version`, add its section to `changelog.md`, push to `main`.
 
 ## Data & privacy
 

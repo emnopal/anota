@@ -4,7 +4,7 @@
 - [x] `scripts/make-app.sh [debug]` → `build/Anota.app` (Info.plist, document types for text, ad-hoc codesign)
 - [x] "Open With → Anota" handled (SwiftUI `.onOpenURL`, updates the existing window)
 - [x] App icon: `scripts/make-icon.swift` → `assets/AppIcon.icns`, bundled by make-app.sh (about panel uses it)
-- [x] Versioning: `.version`, `.changelog`, `scripts/release-tag.sh`, `scripts/release-notes.sh`
+- [x] Versioning: `.version`, `changelog.md`, `scripts/release-tag.sh`, `scripts/release-notes.sh`
 - [x] GitHub Actions CI/CD: test + build on push/PR; release (or `-rc-<datetime>` pre-release) on main
 
 - [x] v0.4 version/changelog/README refresh; plan added to version control

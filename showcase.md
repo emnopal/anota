@@ -5,7 +5,7 @@ Code, Markdown and structured data in one native macOS workspace.
 [![Anota — make room for ideas](assets/showcase/hero.png)](assets/showcase/workspace.png)
 
 The hero frames a cropped capture; the gallery links show the full app views.
-Screenshots were captured from Anota v0.4 using
+Screenshots were captured from Anota v0.5.1 using
 `/private/tmp/anota-verification`. The demo files are `showcase.swift`,
 `showcase.md`, `workspace.json` and `releases.csv`.
 

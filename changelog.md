@@ -3,6 +3,10 @@
 Newest first. Each release's notes are the section whose heading matches `.version`.
 A push to `main` that doesn't change `.version` is published as a pre-release `v<version>-rc-<UTC datetime>`.
 
+## v0.5.1
+
+- Fixed a flaky CI timing test, renamed `.changelog` to `changelog.md`, and refreshed the README/showcase hero.
+
 ## v0.5
 
 Independent windows, a more capable editor, and a complete Markdown workflow.

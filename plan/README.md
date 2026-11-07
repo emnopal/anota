@@ -36,7 +36,7 @@ Suggested order: remaining native file-drop/column-selection verification, then 
 ## Release status
 v0.1 through v0.4 are previous releases. **v0.5 is prepared locally** with independent windows, editor
 settings/multiple cursors, navigation, Markdown improvements, file management and initial LSP support.
-`.version` and `.changelog` drive release notes. No push or publication is part of this update.
+`.version` and `changelog.md` drive release notes. No push or publication is part of this update.
 CI publishes `v0.5` when pushed to main if the tag does not exist, otherwise an RC tag.
 
 ## Requested feature pass — 2026-11-06
